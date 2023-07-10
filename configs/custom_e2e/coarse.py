@@ -2,7 +2,7 @@ import os
 
 _base_ = os.path.join('..', 'default_fine_s.py')
 
-expname = 'scan'
+expname = ''
 basedir = os.path.join('.', 'logs', 'custom')
 train_all = True
 reso_level = 2
@@ -10,7 +10,7 @@ exp_stage = 'coarse'
 
 
 data = dict(
-    datadir=os.path.join('.', 'data'),
+    datadir=os.path.join('.', 'data', ''),
     dataset_type='dtu',
     inverse_y=True,
     white_bkgd= False

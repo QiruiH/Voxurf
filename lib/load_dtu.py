@@ -35,6 +35,8 @@ def load_K_Rt_from_P(filename, P=None):
 
 def load_dtu_data(basedir, normalize=True, reso_level=2, mask=True, white_bg=True):
 
+    # __import__('ipdb').set_trace()
+
     rgb_paths = sorted(glob(os.path.join(basedir, 'image', '*png')))
     if len(rgb_paths) == 0:
         rgb_paths = sorted(glob(os.path.join(basedir, 'image', '*jpg')))

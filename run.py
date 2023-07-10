@@ -873,6 +873,9 @@ def validate_image(cfg, stage, step, data_dict, render_viewpoints_kwargs, eval_a
 def validate_mesh(model, resolution=128, threshold=0.0, prefix="", world_space=False,
                   scale_mats_np=None, gt_eval=False, runtime=True, scene=122, smooth=True,
                   extract_color=False):
+    
+    # __import__('ipdb').set_trace()
+
     os.makedirs(os.path.join(cfg.basedir, cfg.expname, 'meshes'), exist_ok=True)
     bound_min = model.xyz_min.clone().detach().float()
     bound_max = model.xyz_max.clone().detach().float()
@@ -896,6 +899,9 @@ def validate_mesh(model, resolution=128, threshold=0.0, prefix="", world_space=F
         mesh = trimesh.Trimesh(vertices, triangles, vertex_colors=vertex_colors)
     else:
         mesh = trimesh.Trimesh(vertices, triangles)
+    
+    # __import__('ipdb').set_trace()
+
     mesh_path = os.path.join(cfg.basedir, cfg.expname, 'meshes', "{}_".format(scene)+prefix+'.ply')
     mesh.export(mesh_path)
     logger.info("mesh saved at " + mesh_path)
@@ -910,12 +916,18 @@ def validate_mesh(model, resolution=128, threshold=0.0, prefix="", world_space=F
 
 if __name__=='__main__':
     # load setup
+
+    # 准备参数
     parser = config_parser()
     args = parser.parse_args()
     cfg = mmcv.Config.fromfile(args.config)
     # reset the root by the scene id
+
+    # __import__('ipdb').set_trace()
+
     if args.scene:
         cfg.expname += "{}".format(args.scene)
+        # 这里有bug
         cfg.data.datadir += "{}".format(args.scene)
     cfg.expname0 = cfg.expname
     cfg.expname = cfg.expname + '/' + cfg.exp_stage
@@ -923,11 +935,14 @@ if __name__=='__main__':
         cfg.expname += "_" + args.suffix
     cfg.load_expname = args.load_expname if args.load_expname else cfg.expname
     # set up tensorboard
+    # ./logs/custom/scan/train/logs_all/scan/train/coarse
     writer_dir = os.path.join(cfg.basedir, cfg.expname0, 'logs_all', cfg.expname)
     # writer = SummaryWriter(log_dir=writer_dir)
     # set up the logger and tensorboard
+    # ./logs/custom
     cfg.basedir0 = cfg.basedir
     if args.prefix:
+        '''test'''
         cfg.basedir = os.path.join(cfg.basedir, args.prefix)
     log_dir = os.path.join(cfg.basedir, cfg.expname, 'log')
     os.makedirs(log_dir, exist_ok=True)
@@ -955,6 +970,7 @@ if __name__=='__main__':
         device = torch.device('cuda')
     else:
         device = torch.device('cpu')
+    
     seed_everything()
     if getattr(cfg, 'load_expname', None) is None:
         cfg.load_expname = args.load_expname if args.load_expname else cfg.expname
@@ -964,6 +980,7 @@ if __name__=='__main__':
         copyfile('run.py', os.path.join(cfg.basedir, cfg.expname, 'recording', 'run.py'))
         copyfile(args.config, os.path.join(cfg.basedir, cfg.expname, 'recording', args.config.split('/')[-1]))
     import lib.dvgo_ori as dvgo_ori
+
     if args.sdf_mode == "voxurf_coarse":
         import lib.voxurf_coarse as Model
         copyfile('lib/voxurf_coarse.py', os.path.join(cfg.basedir, cfg.expname, 'recording','voxurf_coarse.py'))
@@ -978,6 +995,8 @@ if __name__=='__main__':
         copyfile('lib/voxurf_womask_fine.py', os.path.join(cfg.basedir, cfg.expname, 'recording','voxurf_womask_fine.py'))
     else:
         raise NameError
+    
+    # __import__('ipdb').set_trace()
     # load images / poses / camera settings / data split
     data_dict = load_everything(args=args, cfg=cfg)
 
