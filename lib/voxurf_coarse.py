@@ -826,6 +826,7 @@ def get_training_rays(rgb_tr, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_
         del rays_o, rays_d, viewdirs
     eps_time = time.time() - eps_time
     print('get_training_rays: finish (eps time:', eps_time, 'sec)')
+    # 看起来imsz像一个图片的bitmap，若参与训练则对应1，否则是0
     return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
 
 

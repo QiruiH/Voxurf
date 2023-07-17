@@ -292,6 +292,8 @@ def load_everything(args, cfg):
         print(" * * * Train with all the images: {} * * * ".format(cfg.train_all))
     if 'reso_level' in cfg:
         mode.update(reso_level=cfg.reso_level)
+    
+    # 调用load_data
     data_dict = load_data(cfg.data, **mode, white_bg=cfg.data.white_bkgd)
 
     # remove useless field
@@ -308,6 +310,8 @@ def load_everything(args, cfg):
         data_dict['images'] = [torch.FloatTensor(im, device='cpu').cuda() for im in data_dict['images']]
         data_dict['masks'] = [torch.FloatTensor(im, device='cpu').cuda() for im in data_dict['masks']]
     else:
+        # custom的数据会走这一条分支
+        # 把数据加载到cuda
         data_dict['images'] = torch.FloatTensor(data_dict['images'], device='cpu').cuda()
         data_dict['masks'] = torch.FloatTensor(data_dict['masks'], device='cpu').cuda()
     data_dict['poses'] = torch.Tensor(data_dict['poses'])
@@ -360,9 +364,11 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     # init
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if abs(cfg_model.world_bound_scale - 1) > 1e-9:
+        # 没有进这个分支
         xyz_shift = (xyz_max - xyz_min) * (cfg_model.world_bound_scale - 1) / 2
         xyz_min -= xyz_shift
         xyz_max += xyz_shift
+    # 从之前处理的数据字典中得到需要的数据
     HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images, masks = [
         data_dict[k] for k in [
             'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'masks'
@@ -373,6 +379,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     # find whether there is existing checkpoint path
     last_ckpt_path = os.path.join(cfg.basedir, cfg.expname, f'{stage}_last.tar')
     if args.no_reload:
+        # 不reload检查点
         reload_ckpt_path = None
     elif args.ft_path:
         reload_ckpt_path = args.ft_path
@@ -397,6 +404,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         deduce = 1
 
     if use_dvgo:
+        # 带mask的会进入这个分支
         # use dvgo init for the w/ mask setting
         model = dvgo_ori.DirectVoxGO(
             xyz_min=xyz_min, xyz_max=xyz_max,
@@ -446,6 +454,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
     # init sdf
     if load_sdf_from:
+        # 没有进这个分支
         if hasattr(model, 'init_sdf_from_sdf'):
             sdf_reduce = cfg_train.get('sdf_reduce', 1.0)
             if cfg_train.load_sdf_from == 'auto':
@@ -468,6 +477,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             if smooth:
                 model.sdf = model.smooth_conv(model.sdf)
         optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
+    # 也没有进这个分支
     elif args.sdf_mode != "density" and load_density_from:
         smooth = getattr(model, 'init_density_smooth', True)
         model.init_sdf_from_density(smooth=smooth, reduce=1)
@@ -491,11 +501,14 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     }
 
     # init batch rays sampler
+    # 这是内部定义的一个函数，但是此时并不会运行，只有调用到它是才会执行
     def gather_training_rays():
         if data_dict['irregular_shape']:
+            # 不规则形状
             rgb_tr_ori = [images[i].to('cpu' if cfg.data.load2gpu_on_the_fly else device) for i in i_train]
             mask_tr_ori = [masks[i].to('cpu' if cfg.data.load2gpu_on_the_fly else device) for i in i_train]
         else:
+            # 此时走这个分支
             rgb_tr_ori = images[i_train].to('cpu' if cfg.data.load2gpu_on_the_fly else device)
             mask_tr_ori = masks[i_train].to('cpu' if cfg.data.load2gpu_on_the_fly else device)
 
@@ -515,6 +528,8 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                 HW=HW[i_train], Ks=Ks[i_train], ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
                 flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
         else:
+            # 自己的custom数据走这个分支
+            # Model = lib.voxurf_coarse
             rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = Model.get_training_rays(
                 rgb_tr=rgb_tr_ori,
                 train_poses=poses[i_train],
@@ -526,8 +541,13 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             index_generator = Model.batch_indices_generator(len(rgb_tr), 1)
         batch_index_sampler = lambda: next(index_generator)
         return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler
+    #----函数定义结束-----##
+
+    # 调用上述定义的函数
     rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler = gather_training_rays()
+    
     if cfg_train.pervoxel_lr:
+        # train的时候会进这个分支
         def per_voxel_init():
             cnt = model.voxel_count_views(
                 rays_o_tr=rays_o_tr, rays_d_tr=rays_d_tr, imsz=imsz, near=near, far=far,
@@ -579,6 +599,18 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             rays_d = rays_d_tr[sel_b, sel_r, sel_c]
             viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
         elif cfg_train.ray_sampler == 'random':
+            # 会进入随机采样的分支
+            '''
+            长度都是8192 -- cfg_train.N_rand = 8192
+            rgb_tr.shape = [80, 540, 940, 3]
+            torch.randint: 在该范围内随机采样8192个点
+            sel_b：选择哪张图片
+            sel_r：宽像素点是几
+            sel_c：长像素点是几
+            sel_r和sel_c可以定位一张图片中的一个像素点
+
+            下面的shape都是[8192, 3]
+            '''
             sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand])
             sel_r = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand])
             sel_c = torch.randint(rgb_tr.shape[2], [cfg_train.N_rand])
@@ -591,12 +623,14 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             raise NotImplementedError
 
         if cfg.data.load2gpu_on_the_fly:
+            # 上设备
             target = target.to(device)
             rays_o = rays_o.to(device)
             rays_d = rays_d.to(device)
             viewdirs = viewdirs.to(device)
 
         # volume rendering
+        # 这里调DirectVoxGO()模型的forward函数
         render_result = model(rays_o, rays_d, viewdirs, global_step=global_step, **render_kwargs)
 
         # gradient descent step
@@ -604,6 +638,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         loss = cfg_train.weight_main * F.mse_loss(render_result['rgb_marched'], target)
         psnr = utils.mse2psnr(loss.detach()).item()
 
+        # 计算loss
         if cfg_train.weight_entropy_last > 0:
             pout = render_result['alphainv_cum'][...,-1].clamp(1e-6, 1-1e-6)
             entropy_last_loss = -(pout*torch.log(pout) + (1-pout)*torch.log(1-pout)).mean()
@@ -661,6 +696,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         ws = render_result['weights'].sum(-1)
         if (wm>0).float().mean() > 0:
             psnr_lst.append(psnr)
+            '''
+            这些的长度都是1
+            '''
             weight_lst.append(wm[wm>0].mean().detach().cpu().numpy())
             weight_sum_lst.append(ws[ws>0].mean().detach().cpu().numpy())
             weight_nonzero_lst.append((ws>0).float().mean().detach().cpu().numpy())
@@ -675,6 +713,10 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
         global_step_ = global_step - 1
         # update lr
+        '''
+        更新学习率
+        像这种两个模型都有且只能留一个的部分得考察一下留谁的
+        '''
         N_iters = cfg_train.N_iters
         if not getattr(cfg_train, 'cosine_lr', ''):
             decay_steps = cfg_train.lrate_decay * 1000
@@ -709,6 +751,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             decay_factor = pos_decay_factor / pre_decay_factor
             for i_opt_g, param_group in enumerate(optimizer.param_groups):
                 param_group['lr'] = param_group['lr'] * decay_factor
+        
+        __import__('ipdb').set_trace()
+
         decay_step_module = getattr(cfg_train, 'decay_step_module', dict())
         if global_step_ in decay_step_module:
             for i_opt_g, param_group in enumerate(optimizer.param_groups):
@@ -804,6 +849,10 @@ def train(args, cfg, data_dict):
     # init
     logger.info('train: start')
     eps_time = time.time()
+
+    '''
+    将arg记录到args.txt中，以后所以以后可以直接通过这个文件查看各个args的值
+    '''
     with open(os.path.join(cfg.basedir, cfg.expname, 'args.txt'), 'w') as file:
         for arg in sorted(vars(args)):
             attr = getattr(args, arg)
@@ -811,9 +860,14 @@ def train(args, cfg, data_dict):
     cfg.dump(os.path.join(cfg.basedir, cfg.expname, 'config.py'))
 
     if args.run_dvgo_init:
+        # 会经过这个分支
         # coarse geometry searching
         eps_coarse = time.time()
         xyz_min_coarse, xyz_max_coarse = compute_bbox_by_cam_frustrm(args=args, cfg=cfg, **data_dict)
+        # 这里就开始训练了，1w次
+
+        # __import__('ipdb').set_trace()
+
         scene_rep_reconstruction(
             args=args, cfg=cfg,
             cfg_model=cfg.coarse_model_and_render, cfg_train=cfg.coarse_train,
@@ -1000,6 +1054,8 @@ if __name__=='__main__':
     # load images / poses / camera settings / data split
     data_dict = load_everything(args=args, cfg=cfg)
 
+    # __import__('ipdb').set_trace()
+
     # export scene bbox and camera poses in 3d for debugging and visualization
     if args.export_bbox_and_cams_only:
         logger.info('Export bbox and cameras...')
@@ -1040,6 +1096,7 @@ if __name__=='__main__':
 
     # train
     if not args.render_only:
+        # 开始训练
         train(args, cfg, data_dict)
 
     # load model for rendring

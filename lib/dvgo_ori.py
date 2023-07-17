@@ -12,6 +12,7 @@ import torch.nn.functional as F
 
 '''Model'''
 class DirectVoxGO(torch.nn.Module):
+    '''初始化了一些参数值'''
     def __init__(self, xyz_min, xyz_max,
                  num_voxels=0, num_voxels_base=0,
                  alpha_init=None,
@@ -25,8 +26,11 @@ class DirectVoxGO(torch.nn.Module):
         super(DirectVoxGO, self).__init__()
         self.register_buffer('xyz_min', torch.Tensor(xyz_min))
         self.register_buffer('xyz_max', torch.Tensor(xyz_max))
+        # 0
         self.fast_color_thres = fast_color_thres
+        # False
         self.nearest = nearest
+        # 下面两个都是False
         self.pre_act_density = pre_act_density
         self.in_act_density = in_act_density
         if self.pre_act_density:
@@ -100,6 +104,7 @@ class DirectVoxGO(torch.nn.Module):
                     mask_cache_thres=mask_cache_thres).to(self.xyz_min.device)
             self._set_nonempty_mask()
         else:
+            # 没有预处理的粗糙voxels
             self.mask_cache = None
             self.nonempty_mask = None
 
@@ -274,33 +279,48 @@ class DirectVoxGO(torch.nn.Module):
         # 3. check wheter a raw intersect the bbox or not
         mask_outbbox = (t_max <= t_min)
         # 4. sample points on each ray
+        # [1, 396]
         rng = torch.arange(N_samples)[None].float()
         if is_train:
             rng = rng.repeat(rays_d.shape[-2],1)
             rng += torch.rand_like(rng[:,[0]])
+            # rng: [8192, 396]
         step = stepsize * self.voxel_size * rng
         interpx = (t_min[...,None] + step/rays_d.norm(dim=-1,keepdim=True))
+        # 这里算出rays_pts
         rays_pts = rays_o[...,None,:] + rays_d[...,None,:] * interpx[...,None]
         # 5. update mask for query points outside bbox
         mask_outbbox = mask_outbbox[...,None] | ((self.xyz_min>rays_pts) | (rays_pts>self.xyz_max)).any(dim=-1)
         # import ipdb; ipdb.set_trace()
         return rays_pts, mask_outbbox
 
+    # 调用该函数进行volume rendering，返回颜色、深度等信息
     def forward(self, rays_o, rays_d, viewdirs, global_step=None, **render_kwargs):
         '''Volume rendering'''
 
         ret_dict = {}
 
         # sample points on rays
+        # 出现pts了，调的是DVGO的sample_ray函数
         rays_pts, mask_outbbox = self.sample_ray(
                 rays_o=rays_o, rays_d=rays_d, is_train=global_step is not None, **render_kwargs)
         interval = render_kwargs['stepsize'] * self.voxel_size_ratio
+
+        '''
+        这里需要加上bending network，把rays_pts换掉
+        '''
 
         # update mask for query points in known free space
         if self.mask_cache is not None:
             mask_outbbox[~mask_outbbox] |= (~self.mask_cache(rays_pts[~mask_outbbox]))
 
         # query for alpha
+        '''
+        alpha: [8192, 396]
+        vis_density: [8192, 396]
+        rays_pts: [8192, 396, 3]
+        共8192条rays，每条ray上采样396个点
+        '''
         alpha = torch.zeros_like(rays_pts[...,0])
         vis_density = torch.zeros_like(rays_pts[...,0])
         if self.pre_act_density:
@@ -314,9 +334,14 @@ class DirectVoxGO(torch.nn.Module):
             alpha[~mask_outbbox] = 1 - torch.exp(-density * interval)
         else:
             # post-activation
+            # 走该分支
+            # 内部调的是torch.nn的grid_sampler
             density = self.grid_sampler(rays_pts[~mask_outbbox], self.density)
             alpha[~mask_outbbox] = self.activate_density(density, interval)
 
+        '''
+        下面就是开始计算color和depth
+        '''
         # compute accumulated transmittance
         weights, alphainv_cum = get_ray_marching_ray(alpha)
         # import ipdb; ipdb.set_trace()

@@ -205,6 +205,9 @@ def load_data(args, reso_level=2, train_all=True, wmask=True, white_bg=True):
     if wmask and masks is None:
         masks = images.mean(-1) > 0
 
+    '''处理data得到的全部信息'''
+    # __import__('ipdb').set_trace()
+
     data_dict = dict(
         hwf=hwf, HW=HW, Ks=Ks, near=near, far=far,
         i_train=i_train, i_val=i_val, i_test=i_test,
