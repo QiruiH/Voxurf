@@ -323,6 +323,8 @@ def compute_bbox_by_cam_frustrm(args, cfg, HW, Ks, poses, i_train, near, far, **
     xyz_min = torch.Tensor([np.inf, np.inf, np.inf])
     xyz_max = -xyz_min
     for (H, W), K, c2w in zip(HW[i_train], Ks[i_train], poses[i_train]):
+        # 得到rays_o，rays_d以及viewdirs
+        # 该函数来自于voxurf_coarse.py
         rays_o, rays_d, viewdirs = Model.get_rays_of_a_view(
             H=H, W=W, K=K, c2w=c2w,
             ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
@@ -340,12 +342,18 @@ def compute_bbox_by_coarse_geo(model_class, model_path, thres):
     logger.info('compute_bbox_by_coarse_geo: start')
     eps_time = time.time()
     model = utils.load_model(model_class, model_path, strict=False)
+    '''
+    interp [161, 76, 82, 3]
+    model.density [1, 1, 161, 76, 82]
+    '''
     interp = torch.stack(torch.meshgrid(
         torch.linspace(0, 1, model.density.shape[2]),
         torch.linspace(0, 1, model.density.shape[3]),
         torch.linspace(0, 1, model.density.shape[4]),
     ), -1)
+    # 采样点的坐标 [161, 76, 82, 3]
     dense_xyz = model.xyz_min * (1-interp) + model.xyz_max * interp
+    # 采样点对应的density [161, 76, 82]
     density = model.grid_sampler(dense_xyz, model.density)
     alpha = model.activate_density(density)
     mask = (alpha > thres)
@@ -364,7 +372,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     # init
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if abs(cfg_model.world_bound_scale - 1) > 1e-9:
-        # 没有进这个分支
+        # coarse在DVGO init时没有进这个分支, 之后coarse和fine都进了
         xyz_shift = (xyz_max - xyz_min) * (cfg_model.world_bound_scale - 1) / 2
         xyz_min -= xyz_shift
         xyz_max += xyz_shift
@@ -374,6 +382,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'masks'
         ]
     ]
+    # coarse阶段在DVGO init的时候是用所有的图片来训练
     print("Train idx", i_train, "\nTest idx", i_test)
 
     # find whether there is existing checkpoint path
@@ -404,7 +413,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         deduce = 1
 
     if use_dvgo:
-        # 带mask的会进入这个分支
+        # 带mask的在coarse的init阶段会进入这个分支, model是DirectVoxGO()
         # use dvgo init for the w/ mask setting
         model = dvgo_ori.DirectVoxGO(
             xyz_min=xyz_min, xyz_max=xyz_max,
@@ -414,6 +423,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             exppath=os.path.join(cfg.basedir, cfg.expname),
             **model_kwargs)
     else:
+        # 后续的coarse阶段和fine阶段都会进入这个分支
+        # coarse-Model: lib.voxurf_coarse
+        # fine-Model: lib.voxurf_fine
         model = Model.Voxurf(
             xyz_min=xyz_min, xyz_max=xyz_max,
             num_voxels=num_voxels,
@@ -425,7 +437,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         model.maskout_near_cam_vox(poses[i_train,:3,3], near)
     model = model.to(device)
 
-    # init optimizer
+    # init optimizer，定义优化器的时候这些参数就都传进去了
     optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
 
     load_density_from = getattr(cfg_train, 'load_density_from', '')
@@ -438,6 +450,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             reload_ckpt_path = density_ckpt_path
 
     if reload_ckpt_path is None:
+        # coarse会进这个分支
         logger.info(f'scene_rep_reconstruction ({stage}): train from scratch')
         start = 0
     else:
@@ -454,7 +467,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
     # init sdf
     if load_sdf_from:
-        # 没有进这个分支
+        # coarse一直没有进这个分支，fine进了
         if hasattr(model, 'init_sdf_from_sdf'):
             sdf_reduce = cfg_train.get('sdf_reduce', 1.0)
             if cfg_train.load_sdf_from == 'auto':
@@ -477,7 +490,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             if smooth:
                 model.sdf = model.smooth_conv(model.sdf)
         optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
-    # 也没有进这个分支
+    # coarse和fine都没有进这个分支
     elif args.sdf_mode != "density" and load_density_from:
         smooth = getattr(model, 'init_density_smooth', True)
         model.init_sdf_from_density(smooth=smooth, reduce=1)
@@ -505,14 +518,26 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     def gather_training_rays():
         if data_dict['irregular_shape']:
             # 不规则形状
+            '''
+            coarse:
+            [80, 540, 960, 3]
+            [80, 540, 960, 1]
+            fine:
+            [72, 1080, 1920, 3]
+            [72, 1080, 1920, 1]
+            fine的时候不是用所有的图片train，且没有对图片进行放缩
+            '''
             rgb_tr_ori = [images[i].to('cpu' if cfg.data.load2gpu_on_the_fly else device) for i in i_train]
             mask_tr_ori = [masks[i].to('cpu' if cfg.data.load2gpu_on_the_fly else device) for i in i_train]
         else:
-            # 此时走这个分支
+            # coarse和fine都走这个分支
             rgb_tr_ori = images[i_train].to('cpu' if cfg.data.load2gpu_on_the_fly else device)
             mask_tr_ori = masks[i_train].to('cpu' if cfg.data.load2gpu_on_the_fly else device)
 
         if cfg_train.ray_sampler == 'in_maskcache':
+            # fine阶段走这个分支，coarse在非init部分也走这个分支
+            # 对应的阶段调对应的模型的成员函数
+            # 执行该函数时所用显存显著增加，因为一下子存了所有的rays_o，rays_d等
             rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = Model.get_training_rays_in_maskcache_sampling(
                 rgb_tr_ori=rgb_tr_ori,
                 train_poses=poses[i_train],
@@ -528,8 +553,10 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                 HW=HW[i_train], Ks=Ks[i_train], ndc=cfg.data.ndc, inverse_y=cfg.data.inverse_y,
                 flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
         else:
-            # 自己的custom数据走这个分支
+            # 自己的custom数据coarse阶段走这个分支
             # Model = lib.voxurf_coarse
+            # 这里调的是voxurf_coarse.py中的函数
+            # 返回的是所有图片所有像素点对应的rgb等信息
             rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz = Model.get_training_rays(
                 rgb_tr=rgb_tr_ori,
                 train_poses=poses[i_train],
@@ -537,6 +564,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                 flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
         index_generator = Model.batch_indices_generator(len(rgb_tr), cfg_train.N_rand)
         if cfg_train.ray_sampler == 'patch':
+            # coarse阶段未进这个分支
             # patch sampler contains lots of empty spaces, remove them.
             index_generator = Model.batch_indices_generator(len(rgb_tr), 1)
         batch_index_sampler = lambda: next(index_generator)
@@ -544,10 +572,14 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     #----函数定义结束-----##
 
     # 调用上述定义的函数
+    # coarse后半部分和fine阶段这里返回的是筛选后的rgb，ray等
+    # __import__('ipdb').set_trace()
+
     rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler = gather_training_rays()
     
     if cfg_train.pervoxel_lr:
-        # train的时候会进这个分支
+        # coarse init的时候会进这个分支，初始化每个voxel网格
+        # fine阶段不会再进了
         def per_voxel_init():
             cnt = model.voxel_count_views(
                 rays_o_tr=rays_o_tr, rays_d_tr=rays_d_tr, imsz=imsz, near=near, far=far,
@@ -573,6 +605,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
         # progress scaling checkpoint
         if global_step in cfg_train.pg_scale:
+            # coarse阶段不进该分支，fine阶段也没进
             if hasattr(model, 'num_voxels_bg'):
                 model.scale_volume_grid(model.num_voxels * scale_ratio, model.num_voxels_bg * scale_ratio)
             else:
@@ -581,12 +614,42 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
         # random sample rays
         if cfg_train.ray_sampler in ['flatten', 'in_maskcache']:
+            # coarse阶段init时不会进入该分支采样，后续会
+            # fine阶段会进入这个分支采样
+            # __import__('ipdb').set_trace()
+
+            '''
+            这里直接就拿到sel_i了，但并不是按照每帧来的
+            目前还没看懂这里是的sel_i是根据什么得出来的
+            '''
+            # sel_i.shape = [8192]
+            # 这里应该也要该成单张图采样试试
+            '''
             sel_i = batch_index_sampler()
             target = rgb_tr[sel_i]
             rays_o = rays_o_tr[sel_i]
             rays_d = rays_d_tr[sel_i]
             viewdirs = viewdirs_tr[sel_i]
+            '''
+            sel_i = torch.randint(len(imsz), [1])
+            # 这张图有多少个有效采样点
+            n = imsz[sel_i]
+            # 通过sum得到起始点
+            begin = sum(imsz[:sel_i])
+            # 从该图的采样点中挑出8192个
+            sel_b = torch.randint(begin, begin + n, [cfg_train.N_rand])
+            target = rgb_tr[sel_b]
+            rays_o = rays_o_tr[sel_b]
+            rays_d = rays_d_tr[sel_b]
+            viewdirs = viewdirs_tr[sel_b]
+            
+
+
         elif cfg_train.ray_sampler == 'patch':
+            
+            # 只有这里没改了，加个断点看代码会不会进到这里
+            __import__('ipdb').set_trace()
+
             sel_b = batch_index_sampler()
             patch_size = cfg_train.N_patch
             sel_r_start = torch.randint(rgb_tr.shape[1] - patch_size, [1])
@@ -599,7 +662,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             rays_d = rays_d_tr[sel_b, sel_r, sel_c]
             viewdirs = viewdirs_tr[sel_b, sel_r, sel_c]
         elif cfg_train.ray_sampler == 'random':
-            # 会进入随机采样的分支
+            # coarse阶段首次会进入随机采样的分支
             '''
             长度都是8192 -- cfg_train.N_rand = 8192
             rgb_tr.shape = [80, 540, 940, 3]
@@ -611,7 +674,19 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
             下面的shape都是[8192, 3]
             '''
-            sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand])
+
+            #-------直接把这里改了可行吗？应该可行---------#
+            # __import__('ipdb').set_trace()
+
+            # sel_b = torch.randint(rgb_tr.shape[0], [cfg_train.N_rand])
+            # 改成随机采样一帧，在该帧上采样8192个点
+
+            # 检验一下dtu是不是进到这个分支, 是的
+            # __import__('ipdb').set_trace()
+
+            sel_b = torch.randint(rgb_tr.shape[0], [1])
+            # 扩展维度
+            sel_b = sel_b.expand(cfg_train.N_rand)
             sel_r = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand])
             sel_c = torch.randint(rgb_tr.shape[2], [cfg_train.N_rand])
             target = rgb_tr[sel_b, sel_r, sel_c]
@@ -624,13 +699,16 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
         if cfg.data.load2gpu_on_the_fly:
             # 上设备
+            # 都是 [8192, 3]
             target = target.to(device)
             rays_o = rays_o.to(device)
             rays_d = rays_d.to(device)
             viewdirs = viewdirs.to(device)
 
         # volume rendering
-        # 这里调DirectVoxGO()模型的forward函数
+        '''
+        coarse阶段的init部分这里调DirectVoxGO()模型的forward函数
+        '''
         render_result = model(rays_o, rays_d, viewdirs, global_step=global_step, **render_kwargs)
 
         # gradient descent step
@@ -645,6 +723,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             loss += cfg_train.weight_entropy_last * entropy_last_loss
 
         if cfg_train.weight_rgbper > 0:
+            # coarse阶段走这个分支
             rgbper = (render_result['raw_rgb'] - target.unsqueeze(-2)).pow(2).sum(-1)
             rgbper_loss = (rgbper * render_result['weights'].detach()).sum(-1).mean()
             loss += cfg_train.weight_rgbper * rgbper_loss
@@ -752,7 +831,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             for i_opt_g, param_group in enumerate(optimizer.param_groups):
                 param_group['lr'] = param_group['lr'] * decay_factor
         
-        __import__('ipdb').set_trace()
+        # __import__('ipdb').set_trace()
 
         decay_step_module = getattr(cfg_train, 'decay_step_module', dict())
         if global_step_ in decay_step_module:
@@ -795,6 +874,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             psnr_lst, weight_lst, weight_sum_lst, weight_nonzero_lst, mask_lst, bg_mask_lst, s_val_lst = [], [], [], [], [], [], []
 
         # validate image
+        # args.i_validate = 10000，且在fine的阶段才行
         if global_step%args.i_validate==0 and global_step != cfg_train.N_iters and stage == 'surf' and 'fine' in args.sdf_mode:
             render_viewpoints_kwargs = {
                 'model': model,
@@ -852,6 +932,8 @@ def train(args, cfg, data_dict):
 
     '''
     将arg记录到args.txt中，以后所以以后可以直接通过这个文件查看各个args的值
+    我们也可以通过这个来观察都有哪些config
+    备份一份，这是因为在训练的时候并不知道哪个config是最优的，这样方便后续分析结果
     '''
     with open(os.path.join(cfg.basedir, cfg.expname, 'args.txt'), 'w') as file:
         for arg in sorted(vars(args)):
@@ -860,7 +942,8 @@ def train(args, cfg, data_dict):
     cfg.dump(os.path.join(cfg.basedir, cfg.expname, 'config.py'))
 
     if args.run_dvgo_init:
-        # 会经过这个分支
+        # coarse阶段会经过这个分支
+        # fine阶段不会经过这个分支
         # coarse geometry searching
         eps_coarse = time.time()
         xyz_min_coarse, xyz_max_coarse = compute_bbox_by_cam_frustrm(args=args, cfg=cfg, **data_dict)
@@ -887,12 +970,19 @@ def train(args, cfg, data_dict):
         print(">>> box_size: ", box_size_)
         xyz_min_fine, xyz_max_fine = torch.tensor([-box_size_,-box_size_,-box_size_]).cuda(), torch.tensor([box_size_, box_size_, box_size_]).cuda()
     else:
+        # coarse阶段scene_rep_reconstruction后也会进这个分支
+        # fine阶段直接进这个分支
+        # 是run.py中定义的函数
+        # 从coarse阶段训练的结果中计算bbox
         xyz_min_fine, xyz_max_fine = compute_bbox_by_coarse_geo(
             model_class=dvgo_ori.DirectVoxGO, model_path=coarse_ckpt_path,
             thres=cfg.fine_model_and_render.bbox_thres)
 
     if hasattr(cfg, 'surf_train'):
+        # coarse阶段也会进这个分支
+        # fine阶段进入这个分支
         eps_surf = time.time()
+        # 还是同样的函数，不过stage之类的改了
         scene_rep_reconstruction(
             args=args, cfg=cfg,
             cfg_model=cfg.surf_model_and_render, cfg_train=cfg.surf_train,
@@ -972,6 +1062,8 @@ if __name__=='__main__':
     # load setup
 
     # 准备参数
+    # __import__('ipdb').set_trace()
+
     parser = config_parser()
     args = parser.parse_args()
     cfg = mmcv.Config.fromfile(args.config)
@@ -1036,10 +1128,16 @@ if __name__=='__main__':
     import lib.dvgo_ori as dvgo_ori
 
     if args.sdf_mode == "voxurf_coarse":
+
+        # __import__('ipdb').set_trace()
+
         import lib.voxurf_coarse as Model
         copyfile('lib/voxurf_coarse.py', os.path.join(cfg.basedir, cfg.expname, 'recording','voxurf_coarse.py'))
     elif args.sdf_mode == "voxurf_fine":
         import lib.voxurf_fine as Model
+        
+        # __import__('ipdb').set_trace()
+
         copyfile('lib/voxurf_fine.py', os.path.join(cfg.basedir, cfg.expname, 'recording','voxurf_fine.py'))
     elif args.sdf_mode == "voxurf_womask_coarse":
         import lib.voxurf_womask_coarse as Model
@@ -1054,16 +1152,25 @@ if __name__=='__main__':
     # load images / poses / camera settings / data split
     data_dict = load_everything(args=args, cfg=cfg)
 
+    '''
+
+
+    images : [80, 540, 960, 3]
+    masks : [80, 540, 960, 1]
+    '''
+
     # __import__('ipdb').set_trace()
 
     # export scene bbox and camera poses in 3d for debugging and visualization
     if args.export_bbox_and_cams_only:
+        # fine阶段没有进这个分支
         logger.info('Export bbox and cameras...')
         xyz_min, xyz_max = compute_bbox_by_cam_frustrm(args=args, cfg=cfg, **data_dict)
         poses, HW, Ks, i_train = data_dict['poses'], data_dict['HW'], data_dict['Ks'], data_dict['i_train']
         near, far = data_dict['near'], data_dict['far']
         cam_lst = []
         for c2w, (H, W), K in zip(poses[i_train], HW[i_train], Ks[i_train]):
+            # 循环，给每个图片的每个点都生成相应的rays
             rays_o, rays_d, viewdirs = Model.get_rays_of_a_view(
                 H, W, K, c2w, cfg.data.ndc, inverse_y=cfg.data.inverse_y,
                 flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y,)
@@ -1097,10 +1204,17 @@ if __name__=='__main__':
     # train
     if not args.render_only:
         # 开始训练
+        # 只要不是render_only就会开始train，fine阶段也一样，因为fine阶段也是要train的
+        # coarse和fine都会开始train
         train(args, cfg, data_dict)
 
     # load model for rendring
     if args.render_test or args.render_train or args.render_video or args.interpolate:
+        
+        # 这里应该是最后了
+
+        # __import__('ipdb').set_trace()
+
         if args.ft_path:
             ckpt_path = args.ft_path
             new_kwargs = cfg.fine_model_and_render

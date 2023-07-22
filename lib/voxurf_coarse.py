@@ -487,7 +487,12 @@ class Voxurf(torch.nn.Module):
 
     def sample_ray_ori(self, rays_o, rays_d, near, far, stepsize, is_train=False, **render_kwargs):
         '''Sample query points on rays'''
+        '''
+        rays_o.shape [64, 960, 3], CHUNK = 64
+        rays_d.shape [64, 960, 3]
+        '''
         # 1. determine the maximum number of query points to cover all possible rays
+        # 407
         N_samples = int(np.linalg.norm(np.array(self.sdf.grid.shape[2:])+1) / stepsize) + 1
         # 2. determine the two end-points of ray bbox intersection
         vec = torch.where(rays_d==0, torch.full_like(rays_d, 1e-6), rays_d)
@@ -502,26 +507,42 @@ class Voxurf(torch.nn.Module):
         if is_train:
             rng = rng.repeat(rays_d.shape[-2],1)
             rng += torch.rand_like(rng[:,[0]])
+        # step [1, 407] 可能是采样间隔
         step = stepsize * self.voxel_size * rng
         interpx = (t_min[...,None] + step/rays_d.norm(dim=-1,keepdim=True))
         rays_pts = rays_o[...,None,:] + rays_d[...,None,:] * interpx[...,None]
         # 5. update mask for query points outside bbox
         mask_outbbox = mask_outbbox[...,None] | ((self.xyz_min>rays_pts) | (rays_pts>self.xyz_max)).any(dim=-1)
+        '''
+        rays_pts [64, 960, 407, 3]
+        mask_outbbox [64, 960, 407]
+        step [1, 407]
+        '''
         return rays_pts, mask_outbbox, step
 
 
     def forward(self, rays_o, rays_d, viewdirs, global_step=None, **render_kwargs):
         '''Volume rendering'''
 
+        # __import__('ipdb').set_trace()
+
         ret_dict = {}
+        # 8192
         N = len(rays_o)
         
+        '''
+        fine阶段这里也一样，ray_pts的shape很奇怪，不知道这个会不会影响进bending network
+        ray_pts.shape [1623661, 3]
+        ray_id/step_id/mask_outbbox.shape [1623661]
+        N_steps.shape [8192]
+        '''
         ray_pts, ray_id, step_id, mask_outbbox, N_steps = self.sample_ray_cuda(
                 rays_o=rays_o, rays_d=rays_d, is_train=global_step is not None, **render_kwargs)
         # interval = render_kwargs['stepsize'] * self.voxel_size_ratio
         
         # skip known free space
         if self.mask_cache is not None:
+            # 过完mask后数目会减少
             mask = self.mask_cache(ray_pts)
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
@@ -530,6 +551,9 @@ class Voxurf(torch.nn.Module):
         
         sdf_grid = self.smooth_conv(self.sdf.grid) if self.smooth_sdf else self.sdf.grid
         
+        '''
+        下面要用ray_pts开始查询了，应该这里要过bending network
+        '''
         sdf = self.grid_sampler(ray_pts, sdf_grid)
         self.gradient = self.neus_sdf_gradient(sdf=self.sdf.grid)
         gradient = self.grid_sampler(ray_pts, self.gradient)
@@ -540,6 +564,8 @@ class Voxurf(torch.nn.Module):
         weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
 
         if self.fast_color_thres > 0:
+            # 查询颜色的时候又要再进一次这个分支，因为还要筛掉一些颜色不过阈值的点
+            # 此时的ray_pts已经是bending过的了，不用再加了
             mask = weights > self.fast_color_thres
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
@@ -734,16 +760,24 @@ class Alphas2Weights(torch.autograd.Function):
 
 
 ''' Ray and batch
+得到一张图上所有点对应的rays_o和rays_d
 '''
 def get_rays(H, W, K, c2w, inverse_y, flip_x, flip_y, mode='center'):
     i, j = torch.meshgrid(
         torch.linspace(0, W-1, W, device=c2w.device),
         torch.linspace(0, H-1, H, device=c2w.device))  # pytorch's meshgrid has indexing='ij'
+    '''
+    i和j是根据一张图的长或宽生成的网格
+    i.shape = [540, 960]
+    j.shape = [540, 960]
+    i,j 分别代表某个点的y,x坐标：j[0][2] = 0. i[0][2] = 2
+    '''
     i = i.t().float()
     j = j.t().float()
     if mode == 'lefttop':
         pass
     elif mode == 'center':
+        # 每个都加0.5，相当于取中间点
         i, j = i+0.5, j+0.5
     elif mode == 'random':
         i = i+torch.rand_like(i)
@@ -763,6 +797,11 @@ def get_rays(H, W, K, c2w, inverse_y, flip_x, flip_y, mode='center'):
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
     rays_o = c2w[:3,3].expand(rays_d.shape)
+    '''
+    rays_o: [540, 960, 3]
+    rays_d: [540, 960, 3]
+    这里得到了一张图上所有点对应的rays_o和rays_d
+    '''
     return rays_o, rays_d
 
 
@@ -797,6 +836,7 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
 
 
 def get_rays_of_a_view(H, W, K, c2w, ndc, inverse_y, flip_x, flip_y, mode='center'):
+    # 得到一张图上所有点对应的rays_o和rays_d
     rays_o, rays_d = get_rays(H, W, K, c2w, inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y, mode=mode)
     viewdirs = rays_d / rays_d.norm(dim=-1, keepdim=True)
     if ndc:
@@ -810,16 +850,30 @@ def get_training_rays(rgb_tr, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_
     assert len(np.unique(HW, axis=0)) == 1
     assert len(np.unique(Ks.reshape(len(Ks),-1), axis=0)) == 1
     assert len(rgb_tr) == len(train_poses) and len(rgb_tr) == len(Ks) and len(rgb_tr) == len(HW)
+    '''
+    rgb_tr.shape [80, 540, 960, 3]
+    train_poses [80, 4, 4]
+    HW [80, 2]
+    Ks [80, 4, 4]
+    inverse_y True
+    ndc False
+    '''
     H, W = HW[0]
     K = Ks[0]
     eps_time = time.time()
+    '''
+    三者都是 [80, 540, 960, 3]
+    '''
     rays_o_tr = torch.zeros([len(rgb_tr), H, W, 3], device=rgb_tr.device)
     rays_d_tr = torch.zeros([len(rgb_tr), H, W, 3], device=rgb_tr.device)
     viewdirs_tr = torch.zeros([len(rgb_tr), H, W, 3], device=rgb_tr.device)
+    # 长度为80的列表，每一项都是1
     imsz = [1] * len(rgb_tr)
     for i, c2w in enumerate(train_poses):
+        # 同样，对每张图片的每个点都生成rays_o, rays_d以及viewdirs，并将其全部存到rays_o_tr里
         rays_o, rays_d, viewdirs = get_rays_of_a_view(
             H=H, W=W, K=K, c2w=c2w, ndc=ndc, inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
+        # rays_o，rays_d这些都是[540, 960, 3]，要循环80次
         rays_o_tr[i].copy_(rays_o.to(rgb_tr.device))
         rays_d_tr[i].copy_(rays_d.to(rgb_tr.device))
         viewdirs_tr[i].copy_(viewdirs.to(rgb_tr.device))
@@ -869,6 +923,7 @@ def get_training_rays_in_maskcache_sampling(rgb_tr_ori, train_poses, HW, Ks, ndc
     CHUNK = 64
     DEVICE = rgb_tr_ori[0].device
     eps_time = time.time()
+    # N = 80 * 540 * 960 = 41472000
     N = sum(im.shape[0] * im.shape[1] for im in rgb_tr_ori)
     rgb_tr = torch.zeros([N,3], device=DEVICE)
     rays_o_tr = torch.zeros_like(rgb_tr)
@@ -877,17 +932,23 @@ def get_training_rays_in_maskcache_sampling(rgb_tr_ori, train_poses, HW, Ks, ndc
     imsz = []
     top = 0
     for c2w, img, (H, W), K in zip(train_poses, rgb_tr_ori, HW, Ks):
+        # 一次循环处理一张图片
         assert img.shape[:2] == (H, W)
         rays_o, rays_d, viewdirs = get_rays_of_a_view(
             H=H, W=W, K=K, c2w=c2w, ndc=ndc,
             inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
         mask = torch.ones(img.shape[:2], device=DEVICE, dtype=torch.bool)
         for i in range(0, img.shape[0], CHUNK):
+            # 得到了rays_pts
+            # 每次循环处理该张图片一个chunk的ray
             rays_pts, mask_outbbox, _ = model.sample_ray_ori(
                 rays_o=rays_o[i:i+CHUNK], rays_d=rays_d[i:i+CHUNK], **render_kwargs)
             mask_outbbox[~mask_outbbox] |= (~model.mask_cache(rays_pts[~mask_outbbox]))
+            # 这里的mask是一整张图片的mask，shape为[540, 960]
             mask[i:i+CHUNK] &= (~mask_outbbox).any(-1).to(DEVICE)
+        # 该张图片的有效点数目
         n = mask.sum()
+        # 只存有效点，和fine阶段的这部分流程是一样的
         rgb_tr[top:top+n].copy_(img[mask])
         rays_o_tr[top:top+n].copy_(rays_o[mask].to(DEVICE))
         rays_d_tr[top:top+n].copy_(rays_d[mask].to(DEVICE))

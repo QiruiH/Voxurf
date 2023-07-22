@@ -268,8 +268,10 @@ class DirectVoxGO(torch.nn.Module):
     def sample_ray(self, rays_o, rays_d, near, far, stepsize, is_train=False, near_far=False, **render_kwargs):
         '''Sample query points on rays'''
         # 1. determine the maximum number of query points to cover all possible rays
+        # 396
         N_samples = int(np.linalg.norm(np.array(self.density.shape[2:])+1) / stepsize) + 1
         # 2. determine the two end-points of ray bbox intersection
+        # [8192, 3]
         vec = torch.where(rays_d==0, torch.full_like(rays_d, 1e-6), rays_d)
         rate_a = (self.xyz_max - rays_o) / vec
         rate_b = (self.xyz_min - rays_o) / vec
@@ -292,12 +294,15 @@ class DirectVoxGO(torch.nn.Module):
         # 5. update mask for query points outside bbox
         mask_outbbox = mask_outbbox[...,None] | ((self.xyz_min>rays_pts) | (rays_pts>self.xyz_max)).any(dim=-1)
         # import ipdb; ipdb.set_trace()
+        # 这里都一切正常，计算rays_pts和mask_outbbox
         return rays_pts, mask_outbbox
 
     # 调用该函数进行volume rendering，返回颜色、深度等信息
     def forward(self, rays_o, rays_d, viewdirs, global_step=None, **render_kwargs):
         '''Volume rendering'''
 
+        # __import__('ipdb').set_trace()
+        
         ret_dict = {}
 
         # sample points on rays
@@ -308,6 +313,7 @@ class DirectVoxGO(torch.nn.Module):
 
         '''
         这里需要加上bending network，把rays_pts换掉
+        mask_outbbox同样需要更改
         '''
 
         # update mask for query points in known free space
@@ -334,7 +340,7 @@ class DirectVoxGO(torch.nn.Module):
             alpha[~mask_outbbox] = 1 - torch.exp(-density * interval)
         else:
             # post-activation
-            # 走该分支
+            # coarse阶段走该分支
             # 内部调的是torch.nn的grid_sampler
             density = self.grid_sampler(rays_pts[~mask_outbbox], self.density)
             alpha[~mask_outbbox] = self.activate_density(density, interval)
@@ -350,16 +356,22 @@ class DirectVoxGO(torch.nn.Module):
         #     if global_step % 100 == 0:
         #         self.visualize_weight(vis_density, alpha, weights, step=global_step)
         # query for color
+        '''
+        mask [8192, 396] → 挑出那些权重大于阈值的点
+        k0 [8192, 396, 3]
+        '''
         mask = (weights > self.fast_color_thres)
         k0 = torch.zeros(*weights.shape, self.k0_dim).to(weights)
         if not self.rgbnet_full_implicit:
             k0[mask] = self.grid_sampler(rays_pts[mask], self.k0)
 
         if self.rgbnet is None:
+            # coarse走这条分支
             # no view-depend effect
             rgb = torch.sigmoid(k0)
         else:
             # view-dependent color emission
+            # 走这条分支
             if self.rgbnet_direct:
                 k0_view = k0
             else:
@@ -379,12 +391,14 @@ class DirectVoxGO(torch.nn.Module):
             rgb_logit = torch.zeros(*weights.shape, 3).to(weights)
             rgb_logit[mask] = self.rgbnet(rgb_feat)
             if self.rgbnet_direct:
+                # rgb [8192, 396, 3]
                 rgb = torch.sigmoid(rgb_logit)
             else:
                 rgb_logit[mask] = rgb_logit[mask] + k0_diffuse[mask]
                 rgb = torch.sigmoid(rgb_logit)
 
         # Ray marching
+        # 将一条rays上的点的color通过加权合成到一起
         rgb_marched = (weights[...,None] * rgb).sum(-2) + alphainv_cum[...,[-1]] * render_kwargs['bg']
         rgb_marched = rgb_marched.clamp(0, 1)
         depth = (rays_o[...,None,:] - rays_pts).norm(dim=-1)

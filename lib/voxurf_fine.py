@@ -129,6 +129,7 @@ class Voxurf(torch.nn.Module):
             if self.center_sdf:
                 dim0 += 1
             if not self.use_layer_norm:
+                # 定义rgbnet
                 self.rgbnet = nn.Sequential(
                     nn.Linear(dim0, rgbnet_width), nn.ReLU(inplace=True),
                     *[
@@ -579,15 +580,27 @@ class Voxurf(torch.nn.Module):
     def hit_coarse_geo(self, rays_o, rays_d, near, far, stepsize, **render_kwargs):
         '''Check whether the rays hit the solved coarse geometry or not'''
         far = 1e9  # the given far can be too small while rays stop when hitting scene bbox
+        '''
+        rays_o [64, 1920, 3]
+        rays_d [64, 1920, 3]
+        '''
         shape = rays_o.shape[:-1]
         rays_o = rays_o.reshape(-1, 3).contiguous()
         rays_d = rays_d.reshape(-1, 3).contiguous()
         stepdist = stepsize * self.voxel_size
+        # 这里是调的cuda代码求出ray_pts，ray_id等
+        '''
+        ray_pts: [29699055, 3]
+        mask_outbbox: [29699055]
+        ray_i: [29699055]
+        '''
         ray_pts, mask_outbbox, ray_id = render_utils_cuda.sample_pts_on_rays(
                 rays_o, rays_d, self.xyz_min, self.xyz_max, near, far, stepdist)[:3]
         mask_inbbox = ~mask_outbbox
         hit = torch.zeros([len(rays_o)], dtype=torch.bool)
+        # hit: [122880], 内容为True or False
         hit[ray_id[mask_inbbox][self.mask_cache(ray_pts[mask_inbbox])]] = 1
+        # reshape为[64, 1920]
         return hit.reshape(shape)
 
     def sample_ray(self, rays_o, rays_d, near, far, stepsize, **render_kwargs):
@@ -603,6 +616,11 @@ class Voxurf(torch.nn.Module):
             step_id:          [M]    the i'th step on a ray of each point.
         '''
         far = 1e9  # the given far can be too small while rays stop when hitting scene bbox
+        '''
+        rays_o [8192, 3]
+        rays_d [8192, 3]
+        N_steps [8192]
+        '''
         rays_o = rays_o.contiguous()
         rays_d = rays_d.contiguous()
         stepdist = stepsize * self.voxel_size
@@ -620,15 +638,24 @@ class Voxurf(torch.nn.Module):
     def forward(self, rays_o, rays_d, viewdirs, global_step=None, **render_kwargs):
         '''Volume rendering'''
 
+        # __import__('ipdb').set_trace()
+
         ret_dict = {}
         N = len(rays_o)
 
+        '''
+        拿到ray_pts，ray_id等等
+        ray_pts [231890, 3]
+        ray_id/mask_outbbox [2318940]
+        N_steps [8192]
+        '''
         ray_pts, ray_id, step_id, mask_outbbox, N_steps = self.sample_ray(
                 rays_o=rays_o, rays_d=rays_d, is_train=global_step is not None, **render_kwargs)
         # interval = render_kwargs['stepsize'] * self.voxel_size_ratio
         gradient, gradient_error = None, None
 
         if self.mask_cache is not None:
+            # mask过滤一遍
             mask = self.mask_cache(ray_pts)
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
@@ -636,6 +663,10 @@ class Voxurf(torch.nn.Module):
             mask_outbbox[~mask_outbbox] |= ~mask
 
         sdf_grid = self.smooth_conv(self.sdf.grid) if self.smooth_sdf else self.sdf.grid
+
+        '''
+        这里应该加bending network了，要用pts来查询sdf了
+        '''
 
         sdf, gradient, feat = self.grid_sampler(ray_pts, sdf_grid, sample_ret=True, sample_grad=True, displace=1.0)
 
@@ -645,6 +676,7 @@ class Voxurf(torch.nn.Module):
 
         mask = None
         if self.fast_color_thres > 0:
+            # 再用颜色来一遍过滤
             mask = (alpha > self.fast_color_thres)
             alpha = alpha[mask]
             ray_id = ray_id[mask]
@@ -652,7 +684,11 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             gradient = gradient[mask] # merge to sample once
             sdf = sdf[mask]
-
+        
+        '''
+        下面就是渲染了
+        '''
+        
         # compute accumulated transmittance
         if ray_id.ndim == 2:
             print(mask, alpha, ray_id)
@@ -1123,38 +1159,52 @@ def get_training_rays_flatten(rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, f
     print('get_training_rays_flatten: finish (eps time:', eps_time, 'sec)')
     return rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz
 
-
+# fine阶段会调这个函数
 def get_training_rays_in_maskcache_sampling(rgb_tr_ori, train_poses, HW, Ks, ndc, inverse_y, flip_x, flip_y, model, render_kwargs, rgbnet_sup_reduce=1):
     print('get_training_rays_in_maskcache_sampling: start')
     assert len(rgb_tr_ori) == len(train_poses) and len(rgb_tr_ori) == len(Ks) and len(rgb_tr_ori) == len(HW)
     CHUNK = 64
     DEVICE = rgb_tr_ori[0].device
     eps_time = time.time()
+    '''
+    rgb_tr_ori [72, 1080, 1920, 3]
+    N = 72 * 1080 * 1920 = 149299200
+    '''
     N = sum(im.shape[0] * im.shape[1] for im in rgb_tr_ori)
+    # 这样可以装下所有点的rgb
     rgb_tr = torch.zeros([N,3], device=DEVICE)
     rays_o_tr = torch.zeros_like(rgb_tr)
     rays_d_tr = torch.zeros_like(rgb_tr)
     viewdirs_tr = torch.zeros_like(rgb_tr)
     imsz = []
     top = 0
+    # HW [72, 2], 每一项都是[1080, 1920]
     for c2w, img, (H, W), K in zip(train_poses, rgb_tr_ori, HW, Ks):
         assert img.shape[:2] == (H, W)
+        # 生成一张图片上所有像素点的rays_o，rays_d和viewdirs
         rays_o, rays_d, viewdirs = get_rays_of_a_view(
             H=H, W=W, K=K, c2w=c2w, ndc=ndc,
             inverse_y=inverse_y, flip_x=flip_x, flip_y=flip_y)
         mask = torch.ones(img.shape[:2], device=DEVICE, dtype=torch.bool)
         for i in range(0, img.shape[0], CHUNK):
+            # 分chunk处理，经过该函数得到该chunk的mask，即与voxels是否相交
             mask[i:i+CHUNK] = model.hit_coarse_geo(
                     rays_o=rays_o[i:i+CHUNK], rays_d=rays_d[i:i+CHUNK], **render_kwargs).to(DEVICE)
+        # 表示一共有多少个有效点
         n = mask.sum()
+        # 此时的mask是[1080, 1920]，内容对应该张图片上每个像素是否采样
+        # 将该张图片的有效采样点加入队列
         rgb_tr[top:top+n].copy_(img[mask])
         rays_o_tr[top:top+n].copy_(rays_o[mask].to(DEVICE))
         rays_d_tr[top:top+n].copy_(rays_d[mask].to(DEVICE))
         viewdirs_tr[top:top+n].copy_(viewdirs[mask].to(DEVICE))
         imsz.append(n)
+        # 如果我们记下每一轮的n，就能把每张图片对应的采样点单独拿出来
+        # imsz干的就是这个事情，我们可以直接用
         top += n
 
     print('get_training_rays_in_maskcache_sampling: ratio', top / N)
+    # 截掉后续的无效内容
     rgb_tr = rgb_tr[:top]
     rays_o_tr = rays_o_tr[:top]
     rays_d_tr = rays_d_tr[:top]
