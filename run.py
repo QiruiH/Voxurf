@@ -17,6 +17,7 @@ from lib import utils, dtu_eval
 from lib.load_data import load_data
 from lib.utils import rgb_to_luminance, get_sobel, calc_grad, \
     GradLoss, write_ply, load_point_cloud, get_root_logger
+from lib.fields import BendingNetwork
 from torch_efficient_distloss import flatten_eff_distloss
 from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
@@ -341,6 +342,9 @@ def compute_bbox_by_cam_frustrm(args, cfg, HW, Ks, poses, i_train, near, far, **
 def compute_bbox_by_coarse_geo(model_class, model_path, thres):
     logger.info('compute_bbox_by_coarse_geo: start')
     eps_time = time.time()
+
+    # __import__('ipdb').set_trace()
+
     model = utils.load_model(model_class, model_path, strict=False)
     '''
     interp [161, 76, 82, 3]
@@ -352,6 +356,9 @@ def compute_bbox_by_coarse_geo(model_class, model_path, thres):
         torch.linspace(0, 1, model.density.shape[4]),
     ), -1)
     # 采样点的坐标 [161, 76, 82, 3]
+
+    # __import__('ipdb').set_trace()
+
     dense_xyz = model.xyz_min * (1-interp) + model.xyz_max * interp
     # 采样点对应的density [161, 76, 82]
     density = model.grid_sampler(dense_xyz, model.density)
@@ -385,6 +392,8 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     # coarse阶段在DVGO init的时候是用所有的图片来训练
     print("Train idx", i_train, "\nTest idx", i_test)
 
+    # __import__('ipdb').set_trace()
+
     # find whether there is existing checkpoint path
     last_ckpt_path = os.path.join(cfg.basedir, cfg.expname, f'{stage}_last.tar')
     if args.no_reload:
@@ -400,6 +409,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         reload_ckpt_path = None
 
     # init model
+    # 在这里初始化网络，那我们也先加到这里吧
     model_kwargs = copy.deepcopy(cfg_model)
     scale_ratio = getattr(cfg_train, 'scale_ratio', 2)
     num_voxels = model_kwargs.pop('num_voxels')
@@ -411,6 +421,13 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         logger.info("\n" + "+ "*10 + "start with {} resolution deduction".format(deduce) + " +"*10 + "\n")
     else:
         deduce = 1
+
+    # __import__('ipdb').set_trace()
+
+    # 计算图片数目
+    n_images = len(data_dict['images'])
+    # 加到参数里
+    model_kwargs['n_images'] = n_images
 
     if use_dvgo:
         # 带mask的在coarse的init阶段会进入这个分支, model是DirectVoxGO()
@@ -437,8 +454,11 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         model.maskout_near_cam_vox(poses[i_train,:3,3], near)
     model = model.to(device)
 
+    __import__('ipdb').set_trace()
+
+    # model = model + model.bending_latents_list
     # init optimizer，定义优化器的时候这些参数就都传进去了
-    optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
+    optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0, bending_latents_list=model.bending_latents_list)
 
     load_density_from = getattr(cfg_train, 'load_density_from', '')
     load_sdf_from = getattr(cfg_train, 'load_sdf_from', '')
@@ -612,6 +632,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                 model.scale_volume_grid(model.num_voxels * scale_ratio)
             optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
 
+        # 添加frame
+        frame = 0
+
         # random sample rays
         if cfg_train.ray_sampler in ['flatten', 'in_maskcache']:
             # coarse阶段init时不会进入该分支采样，后续会
@@ -631,11 +654,12 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             rays_d = rays_d_tr[sel_i]
             viewdirs = viewdirs_tr[sel_i]
             '''
-            sel_i = torch.randint(len(imsz), [1])
+            sel_b = torch.randint(len(imsz), [1])
+            frame = sel_b[0]
             # 这张图有多少个有效采样点
-            n = imsz[sel_i]
+            n = imsz[sel_b]
             # 通过sum得到起始点
-            begin = sum(imsz[:sel_i])
+            begin = sum(imsz[:sel_b])
             # 从该图的采样点中挑出8192个
             sel_b = torch.randint(begin, begin + n, [cfg_train.N_rand])
             target = rgb_tr[sel_b]
@@ -648,7 +672,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         elif cfg_train.ray_sampler == 'patch':
             
             # 只有这里没改了，加个断点看代码会不会进到这里
-            __import__('ipdb').set_trace()
+            # __import__('ipdb').set_trace()
 
             sel_b = batch_index_sampler()
             patch_size = cfg_train.N_patch
@@ -685,6 +709,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             # __import__('ipdb').set_trace()
 
             sel_b = torch.randint(rgb_tr.shape[0], [1])
+            frame = sel_b[0]
             # 扩展维度
             sel_b = sel_b.expand(cfg_train.N_rand)
             sel_r = torch.randint(rgb_tr.shape[1], [cfg_train.N_rand])
@@ -709,7 +734,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         '''
         coarse阶段的init部分这里调DirectVoxGO()模型的forward函数
         '''
-        render_result = model(rays_o, rays_d, viewdirs, global_step=global_step, **render_kwargs)
+        render_result = model(rays_o, rays_d, viewdirs, frame, global_step=global_step, **render_kwargs)
+
+        __import__('ipdb').set_trace()
 
         # gradient descent step
         optimizer.zero_grad(set_to_none=True)
@@ -717,6 +744,18 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         psnr = utils.mse2psnr(loss.detach()).item()
 
         # 计算loss
+        # 加上bending network的loss
+        if cfg.bending_network:
+            offset_loss = render_result['offset_loss']
+            divergence_loss = render_result['divergence_loss']
+            bending_losses = offset_loss * cfg_train.offset_weight \
+                            + divergence_loss * cfg_train.divergence_weight
+            if cfg_train.bending_increasing:
+                # 进了这个分支
+                # Increasing schedule for bending losses as per NR-NeRF
+                bending_losses *= ((1. / 100.) ** (1. - (global_step / cfg_train.N_iters)))
+            loss += bending_losses
+
         if cfg_train.weight_entropy_last > 0:
             pout = render_result['alphainv_cum'][...,-1].clamp(1e-6, 1-1e-6)
             entropy_last_loss = -(pout*torch.log(pout) + (1-pout)*torch.log(1-pout)).mean()
@@ -978,6 +1017,8 @@ def train(args, cfg, data_dict):
             model_class=dvgo_ori.DirectVoxGO, model_path=coarse_ckpt_path,
             thres=cfg.fine_model_and_render.bbox_thres)
 
+    __import__('ipdb').set_trace()
+
     if hasattr(cfg, 'surf_train'):
         # coarse阶段也会进这个分支
         # fine阶段进入这个分支
@@ -1067,6 +1108,9 @@ if __name__=='__main__':
     parser = config_parser()
     args = parser.parse_args()
     cfg = mmcv.Config.fromfile(args.config)
+
+    # __import__('ipdb').set_trace()
+    
     # reset the root by the scene id
 
     # __import__('ipdb').set_trace()

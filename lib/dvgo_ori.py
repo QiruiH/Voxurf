@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from lib.fields import BendingNetwork
 
 
 '''Model'''
@@ -24,6 +25,9 @@ class DirectVoxGO(torch.nn.Module):
                  posbase_pe=5, viewbase_pe=4,
                  **kwargs):
         super(DirectVoxGO, self).__init__()
+
+        # __import__('ipdb').set_trace()
+
         self.register_buffer('xyz_min', torch.Tensor(xyz_min))
         self.register_buffer('xyz_max', torch.Tensor(xyz_max))
         # 0
@@ -107,6 +111,35 @@ class DirectVoxGO(torch.nn.Module):
             # 没有预处理的粗糙voxels
             self.mask_cache = None
             self.nonempty_mask = None
+
+        '''
+        添加bending network
+        '''
+        self.template_frames = -1
+        self.bending_network = None
+        if 'bending_network' in kwargs:
+            if kwargs['bending_network_train'].zero_init == True:
+                self.bending_latents_list = [
+                    # self.conf.get_int('model.bending_network.latent_dim') = 64，隐向量的维度
+                    torch.zeros(kwargs['bending_network'].latent_dim)
+                    for _ in range(kwargs['n_images'])
+                ]
+            else:
+                self.bending_latents_list = [
+                torch.randn(kwargs['bending_network'].latent_dim)
+                for _ in range(kwargs['n_images'])
+            ]
+            # 每个隐向量都需要梯度
+            for latent in self.bending_latents_list:
+                latent.requires_grad = True
+
+            self.bending_network = BendingNetwork(
+                self.bending_latents_list,
+                **kwargs['bending_network'],
+                template_frames=self.template_frames
+            )
+
+            
 
     def inside_sphere(self):
         self_grid_xyz = torch.stack(torch.meshgrid(
@@ -298,7 +331,7 @@ class DirectVoxGO(torch.nn.Module):
         return rays_pts, mask_outbbox
 
     # 调用该函数进行volume rendering，返回颜色、深度等信息
-    def forward(self, rays_o, rays_d, viewdirs, global_step=None, **render_kwargs):
+    def forward(self, rays_o, rays_d, viewdirs, frame, global_step=None, **render_kwargs):
         '''Volume rendering'''
 
         # __import__('ipdb').set_trace()
@@ -313,8 +346,14 @@ class DirectVoxGO(torch.nn.Module):
 
         '''
         这里需要加上bending network，把rays_pts换掉
-        mask_outbbox同样需要更改
+        mask_outbbox暂时先不改，这个和pts应该是一对一对应，与弯曲不弯曲没关系
         '''
+        rays_pts, bending_details = self.bending_network(rays_pts, frame)
+        # 重新计算viewdirs
+        viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+
+        # 下面的pts以及viewdirs就是形变过的了
+
 
         # update mask for query points in known free space
         if self.mask_cache is not None:
@@ -404,6 +443,25 @@ class DirectVoxGO(torch.nn.Module):
         depth = (rays_o[...,None,:] - rays_pts).norm(dim=-1)
         depth = (weights * depth).sum(-1) + alphainv_cum[...,-1] * render_kwargs['far']
         disp = 1 / depth
+
+        # 计算bending network相关loss
+        if self.bending_network is not None:
+            # Losses specific to the bending network
+            # 计算loss，具体算法没细看，应该是对论文的复现
+                # 这两个loss应该就是bending network相关的loss
+            offset_loss = self.bending_network.compute_offset_loss(
+                bending_details,
+                weights,
+                frame
+            )
+            divergence_loss = self.bending_network.compute_divergence_loss(
+                bending_details,
+                weights,
+                frame
+            )
+            offset_loss = torch.mean(offset_loss)
+            divergence_loss = torch.mean(divergence_loss)
+
         ret_dict.update({
             'alphainv_cum': alphainv_cum,
             'weights': weights,
@@ -414,6 +472,8 @@ class DirectVoxGO(torch.nn.Module):
             'disp': disp,
             'mask': mask,
             'mask_outbbox':mask_outbbox,
+            'offset_loss': offset_loss,
+            'divergence_loss': divergence_loss
         })
         return ret_dict
 

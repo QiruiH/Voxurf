@@ -32,8 +32,8 @@ data = dict(
 ''' Template of training options
 '''
 coarse_train = dict(
-    N_iters=10000,                # number of optimization steps
-    N_rand=8192,                  # batch size (number of random rays per optimization step)
+    N_iters=5000, #10000,                # number of optimization steps
+    N_rand=1024, #8192,                  # batch size (number of random rays per optimization step)
     lrate_density=1e-1,           # lr of density voxel grid
     lrate_k0=1e-1,                # lr of color/feature voxel grid
     lrate_rgbnet=1e-3,            # lr of the mlp to predict view-dependent color
@@ -51,7 +51,12 @@ coarse_train = dict(
     weight_tv_k0=0.0,             # weight of total variation loss of color/feature voxel grid
     pg_scale=[],                  # checkpoints for progressive scaling
 
-    save_iter=10000
+    save_iter=5000, #10000,
+
+    bending_increasing = True,
+    flow_weight = 0.0, 
+    divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
+    offset_weight = 20000.0
 )
 
 fine_train = deepcopy(coarse_train)
@@ -102,6 +107,18 @@ coarse_model_and_render = dict(
     stepsize=0.5,                 # sampling stepsize in volume rendering
 
     sdfnet_dim=0,
+
+    # bending network 相关的参数都先加到这里
+    bending_network=dict(
+        latent_dim = 64,
+        d_hidden = 64,
+        n_layers = 5,
+    ),
+
+    bending_network_train=dict(
+        bending_increasing = True,
+        zero_init = True,
+    ),
 )
 
 fine_model_and_render = deepcopy(coarse_model_and_render)

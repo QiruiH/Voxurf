@@ -199,9 +199,11 @@ def adam(params: List[Tensor],
             param.addcdiv_(exp_avg, denom, value=-step_size)
 
 
-def create_optimizer_or_freeze_model(model, cfg_train, global_step):
+def create_optimizer_or_freeze_model(model, cfg_train, global_step, bending_latents_list=None):
     decay_steps = cfg_train.lrate_decay * 1000
-    decay_factor = 0.1 ** (global_step/decay_steps)
+    decay_factor = 0.1 ** (global_step/decay_steps) 
+
+    # __import__('ipdb').set_trace()
 
     param_group = []
     for k in cfg_train.keys():
@@ -226,6 +228,13 @@ def create_optimizer_or_freeze_model(model, cfg_train, global_step):
         else:
             print(f'create_optimizer_or_freeze_model: param {k} freeze')
             param.requires_grad = False
+    
+    __import__('ipdb').set_trace()
+
+    if bending_latents_list is not None:
+        bending_latents_list = bending_latents_list.parameters()
+        param_group.append({'params': bending_latents_list})
+
     return Adam(param_group, betas=(0.9,0.99))
 
 
@@ -277,6 +286,8 @@ def load_weight_by_name(model, ckpt_path, deduce=1, name='density', return_raw=F
     return model
 
 def load_model(model_class, ckpt_path, new_kwargs=None, strict=False):
+    
+    # __import__('ipdb').set_trace()
     ckpt = torch.load(ckpt_path)
     if new_kwargs is not None:
         for k, v in new_kwargs.items():
@@ -287,7 +298,10 @@ def load_model(model_class, ckpt_path, new_kwargs=None, strict=False):
 
     model = model_class(**ckpt['model_kwargs'])
     try:
-        model.load_state_dict(ckpt['model_state_dict'], strict=True)
+        # 这是python自带的
+        # model.load_state_dict(ckpt['model_state_dict'], strict=True)
+        # 允许有多余的参数
+        model.load_state_dict(ckpt['model_state_dict'], strict=False)
         print(">>> Checkpoint loaded successfully from {}".format(ckpt_path))
     except Exception as e:
         print(e)

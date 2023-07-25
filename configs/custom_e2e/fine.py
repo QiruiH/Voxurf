@@ -7,6 +7,7 @@ basedir = os.path.join('.', 'logs', 'custom')
 train_all = False
 reso_level = 1
 exp_stage = 'fine'
+bending_network = True
 
 
 data = dict(
@@ -52,6 +53,21 @@ surf_train=dict(
     lrate_k0=1e-1, #1e-1,                # lr of color/feature voxel grid
     lrate_rgbnet=1e-3 * 3, # 1e-3,       # lr of the mlp to predict view-dependent color
     lrate_k_rgbnet=1e-3,
+    
+    # bending network 相关的参数都先加到这里
+    bending_network=dict(
+        latent_dim = 64,
+        d_hidden = 64,
+        n_layers = 5,
+    ),
+
+    bending_network_train=dict(
+        bending_increasing = True,
+        zero_init = True,
+        flow_weight = 0.0, 
+        divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
+        offset_weight = 20000.0
+    ),
 )
 
 surf_model_and_render=dict(

@@ -49,7 +49,12 @@ coarse_train = dict(
     weight_tv_k0=0.0,             # weight of total variation loss of color/feature voxel grid
     pg_scale=[],                  # checkpoints for progressive scaling
 
-    save_iter=10000
+    save_iter=10000,
+    
+    bending_increasing = True,
+    flow_weight = 0.0, 
+    divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
+    offset_weight = 20000.0
 )
 
 fine_train = deepcopy(coarse_train)
@@ -82,6 +87,16 @@ coarse_model_and_render = dict(
     maskout_near_cam_vox=True,    # maskout grid points that between cameras and their near planes
     world_bound_scale=1,          # rescale the BBox enclosing the scene
     stepsize=0.5,                 # sampling stepsize in volume rendering
+    # bending network 相关的参数都先加到这里
+    bending_network=dict(
+        latent_dim = 64,
+        d_hidden = 64,
+        n_layers = 5,
+    ),
+
+    bending_network_train=dict(
+        zero_init = True,
+    ),
 )
 
 fine_model_and_render = deepcopy(coarse_model_and_render)
