@@ -229,11 +229,20 @@ def create_optimizer_or_freeze_model(model, cfg_train, global_step, bending_late
             print(f'create_optimizer_or_freeze_model: param {k} freeze')
             param.requires_grad = False
     
-    __import__('ipdb').set_trace()
+    # __import__('ipdb').set_trace()
 
     if bending_latents_list is not None:
-        bending_latents_list = bending_latents_list.parameters()
-        param_group.append({'params': bending_latents_list})
+        print('*'*30, 'add bending_network for optimizer.')
+
+        # bending_latents_list = bending_latents_list.parameters()
+        # param_group.append({'params': bending_latents_list})
+
+        # 暂时用一下Voxurf的decay_factor
+        bn_lr = 5e-5 * decay_factor
+        for latent in bending_latents_list:
+            param_group.append({'params': latent, 'lr': bn_lr})
+
+        param_group.append({'params': model.bending_network.parameters(), 'lr': bn_lr})
 
     return Adam(param_group, betas=(0.9,0.99))
 

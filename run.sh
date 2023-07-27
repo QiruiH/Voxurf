@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=1, proxy bash single_runner.sh configs/custom_e2e test_dvgo train

@@ -454,7 +454,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         model.maskout_near_cam_vox(poses[i_train,:3,3], near)
     model = model.to(device)
 
-    __import__('ipdb').set_trace()
+    # __import__('ipdb').set_trace()
 
     # model = model + model.bending_latents_list
     # init optimizer，定义优化器的时候这些参数就都传进去了
@@ -736,7 +736,13 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         '''
         render_result = model(rays_o, rays_d, viewdirs, frame, global_step=global_step, **render_kwargs)
 
-        __import__('ipdb').set_trace()
+        if global_step == cfg_train.N_iters:
+            # 最后记一下隐向量的值
+            with open('bending_latents.txt','w+') as f:
+                str_latents = ",\n".join(["".join(str(latent.tolist())) for latent in model.bending_latents_list])
+                f.write(str_latents)
+        
+        # __import__('ipdb').set_trace()
 
         # gradient descent step
         optimizer.zero_grad(set_to_none=True)
@@ -790,6 +796,13 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
         
         loss.backward()
+        '''
+        for key, param in model.bending_network.named_parameters():
+            print(key, ' : ',param.grad)
+        for key, param in model.named_parameters():
+            print(key, ' : ',param.grad)
+        '''
+        
         # make sure that density has no grad
         if global_step>cfg_train.tv_from and global_step<cfg_train.tv_end and global_step%cfg_train.tv_every==0:
             if not getattr(cfg_train, 'ori_tv', False):
@@ -874,11 +887,21 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
         decay_step_module = getattr(cfg_train, 'decay_step_module', dict())
         if global_step_ in decay_step_module:
+            # __import__('ipdb').set_trace()
             for i_opt_g, param_group in enumerate(optimizer.param_groups):
-                if param_group['name'] in decay_step_module[global_step_]:
-                    decay_factor = decay_step_module[global_step_][param_group['name']]
-                    param_group['lr'] = param_group['lr'] * decay_factor
-                    logger.info('- '*10 + '[Decay lrate] for {} by {}'.format(param_group['name'], decay_factor) + ' -'*10)
+                # 这里出了问题，没有'name'这个key，奇了怪了
+                # 明天跑一下2080的代码对比找一下问题吧
+                try:
+                    '''
+                    因为只有前四项有，后我们自己加的bending network以及隐向量目前对应的是没有的
+                    '''
+                    if param_group['name'] in decay_step_module[global_step_]:
+                        decay_factor = decay_step_module[global_step_][param_group['name']]
+                        param_group['lr'] = param_group['lr'] * decay_factor
+                        logger.info('- '*10 + '[Decay lrate] for {} by {}'.format(param_group['name'], decay_factor) + ' -'*10)
+                except:
+                    break
+
 
         # update tv terms
         tv_updates = getattr(cfg_train, 'tv_updates', dict())
@@ -948,14 +971,26 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
 
         # save checkpoints
         if global_step == cfg_train.N_iters:
+
+            # __import__('ipdb').set_trace()
+
+            # 这里是存档点，我们试试在这添加对隐向量和bending network参数的存储
             torch.save({
                 'global_step': global_step,
                 'model_kwargs': model.get_kwargs(),
                 'MaskCache_kwargs': model.get_MaskCache_kwargs(),
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
+                'bending_latents_list': model.bending_latents_list,
+                # 这是个迭代器
+                # 'bending_network_parameters': model.bending_network.named_parameters,
+                'bending_network': model.bending_network
             }, last_ckpt_path)
             logger.info(f'scene_rep_reconstruction ({stage}): saved checkpoints at '+ last_ckpt_path)
+            
+            # print("+++++++++++++++in dvgo stage++++++++++++++")
+            # for key, param in model.bending_network.named_parameters():
+                # print(key, ' : ',param)
 
         # final mesh validation
         if global_step == cfg_train.N_iters and stage == 'surf' and 'fine' in args.sdf_mode:
@@ -1017,7 +1052,7 @@ def train(args, cfg, data_dict):
             model_class=dvgo_ori.DirectVoxGO, model_path=coarse_ckpt_path,
             thres=cfg.fine_model_and_render.bbox_thres)
 
-    __import__('ipdb').set_trace()
+    # __import__('ipdb').set_trace()
 
     if hasattr(cfg, 'surf_train'):
         # coarse阶段也会进这个分支

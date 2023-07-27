@@ -125,7 +125,11 @@ class Voxurf(torch.nn.Module):
             print('feature voxel grid', self.k0.grid.shape)
             print('mlp', self.rgbnet)
 
+        # 这里加载出了原来存档的文件
         # Using the coarse geometry if provided (used to determine known free space and unknown space)
+        
+        # __import__('ipdb').set_trace()
+
         self.mask_cache_path = mask_cache_path
         self.mask_cache_thres = mask_cache_thres
         if mask_cache_path is not None and mask_cache_path:
@@ -136,6 +140,26 @@ class Voxurf(torch.nn.Module):
         else:
             self.mask_cache = None
             self.nonempty_mask = None
+
+        '''
+        self.mask_cache.bending_latents_list就能拿到隐向量
+        self.mask_cache.bending_network可以拿到之前训的bending network的参数
+        或者我们试试直接把bending network存起来？看看能不能用？
+        '''
+
+        '''
+        添加bending network
+        '''
+        self.template_frames = -1
+        self.bending_network = None
+        if 'bending_network' in kwargs:
+            self.bending_network = self.mask_cache.bending_network
+            self.bending_latents_list = self.mask_cache.bending_latents_list
+        
+        # test bending network
+        # print("+++++++++++++++in coarse voxurf++++++++++++++")
+        # for key, param in self.bending_network.named_parameters():
+            # print(key, ' : ',param)
 
         # grad conv to calculate gradient
         self.init_gradient_conv()
@@ -521,8 +545,9 @@ class Voxurf(torch.nn.Module):
         return rays_pts, mask_outbbox, step
 
 
-    def forward(self, rays_o, rays_d, viewdirs, global_step=None, **render_kwargs):
+    def forward(self, rays_o, rays_d, viewdirs, frame, global_step=None, bending_latents_list=None, **render_kwargs):
         '''Volume rendering'''
+        # 这里的viewdirs [8192, 3]
 
         # __import__('ipdb').set_trace()
 
@@ -548,16 +573,29 @@ class Voxurf(torch.nn.Module):
             ray_id = ray_id[mask]
             step_id = step_id[mask]
             mask_outbbox[~mask_outbbox] |= ~mask
-        
+            
         sdf_grid = self.smooth_conv(self.sdf.grid) if self.smooth_sdf else self.sdf.grid
         
         '''
         下面要用ray_pts开始查询了，应该这里要过bending network
         '''
+        ray_pts, bending_details = self.bending_network(ray_pts, frame)
+        # 重新计算viewdirs
+        '''
+        这里的viewdirs的shape变成[449995, 3]了，相当于每个点对应一个viewdirs
+        原来是每条ray对应一个viewdirs
+        '''
+        viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+        viewdirs = viewdirs.squeeze(0)
+
         sdf = self.grid_sampler(ray_pts, sdf_grid)
         self.gradient = self.neus_sdf_gradient(sdf=self.sdf.grid)
         gradient = self.grid_sampler(ray_pts, self.gradient)
         dist = render_kwargs['stepsize'] * self.voxel_size
+        
+        # __import__('ipdb').set_trace()
+        # 这里会出问题，需要malloc 2k+GB，但是不明白加bending network对这个有什么影响
+        # 现在这里能过得去了，但是不知道对不对，毕竟viewdirs维度都变了
         s_val, alpha = self.neus_alpha_from_sdf_scatter(viewdirs, ray_id, dist, sdf, gradient, global_step=global_step,
                                                         is_train=global_step is not None, use_mid=True)
         
@@ -572,6 +610,9 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             alpha = alpha[mask]
             gradient = gradient[mask]
+            bending_details['input_pts'] = bending_details['input_pts'][mask]
+            bending_details['offsets'] = bending_details['offsets'][mask]
+            bending_details['bent_pts'] = bending_details['bent_pts'][mask]
 
         weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
         
@@ -627,6 +668,26 @@ class Voxurf(torch.nn.Module):
             depth = None
             disp = None
 
+        # __import__('ipdb').set_trace()
+
+        # 计算bending network相关loss
+        if self.bending_network is not None:
+            # Losses specific to the bending network
+            # 计算loss，具体算法没细看，应该是对论文的复现
+                # 这两个loss应该就是bending network相关的loss
+            offset_loss = self.bending_network.compute_offset_loss(
+                bending_details,
+                weights,
+                frame
+            )
+            divergence_loss = self.bending_network.compute_divergence_loss(
+                bending_details,
+                weights,
+                frame
+            )
+            offset_loss = torch.mean(offset_loss)
+            divergence_loss = torch.mean(divergence_loss)
+
         ret_dict.update({
             'alphainv_cum': alphainv_last,
             'weights': weights,
@@ -640,7 +701,9 @@ class Voxurf(torch.nn.Module):
             'mask_outbbox':mask_outbbox,
             'gradient': gradient,
             "gradient_error": None,
-            "s_val": s_val
+            "s_val": s_val,
+            'offset_loss': offset_loss,
+            'divergence_loss': divergence_loss
         })
         return ret_dict
 
@@ -697,6 +760,9 @@ It supports query for the known free space and unknown space.
 class MaskCache(nn.Module):
     def __init__(self, path, mask_cache_thres, ks=3):
         super().__init__()
+
+        # __import__('ipdb').set_trace()
+
         st = torch.load(path)
         self.mask_cache_thres = mask_cache_thres
         self.register_buffer('xyz_min', torch.FloatTensor(st['MaskCache_kwargs']['xyz_min']))
@@ -706,6 +772,23 @@ class MaskCache(nn.Module):
         self.act_shift = st['MaskCache_kwargs']['act_shift']
         self.voxel_size_ratio = st['MaskCache_kwargs']['voxel_size_ratio']
         self.nearest = st['MaskCache_kwargs'].get('nearest', False)
+        # 把隐向量拿出来
+        self.bending_latents_list = st['bending_latents_list']
+        # bending network的也拿出来吧，但不知道这个方式行不行
+        '''
+        self.bending_network = dict(
+            bending_network_0_weight = st['model_state_dict']['bending_network.network.0.weight'],
+            bending_network_0_bias   = st['model_state_dict']['bending_network.network.0.bias'],
+            bending_network_1_weight = st['model_state_dict']['bending_network.network.1.weight'],
+            bending_network_1_bias   = st['model_state_dict']['bending_network.network.1.bias'],
+            bending_network_2_weight = st['model_state_dict']['bending_network.network.2.weight'],
+            bending_network_2_bias   = st['model_state_dict']['bending_network.network.2.bias'],
+            bending_network_3_weight = st['model_state_dict']['bending_network.network.3.weight'],
+            bending_network_3_bias   = st['model_state_dict']['bending_network.network.3.bias'],
+            bending_network_4_weight = st['model_state_dict']['bending_network.network.4.weight']
+        )
+        '''
+        self.bending_network = st['bending_network']
 
     @torch.no_grad()
     def forward(self, xyz):

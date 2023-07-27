@@ -348,6 +348,9 @@ class DirectVoxGO(torch.nn.Module):
         这里需要加上bending network，把rays_pts换掉
         mask_outbbox暂时先不改，这个和pts应该是一对一对应，与弯曲不弯曲没关系
         '''
+
+        # __import__('ipdb').set_trace()
+
         rays_pts, bending_details = self.bending_network(rays_pts, frame)
         # 重新计算viewdirs
         viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)

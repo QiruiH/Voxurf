@@ -93,7 +93,7 @@ class BendingNetwork(nn.Module):
             if use_last_layer_bias:
                 self.network[-1].bias.data *= 0.0
     
-    '''
+    
     def forward(self,
                 input_pts, # not positionally encoded!
                 frame):
@@ -101,16 +101,15 @@ class BendingNetwork(nn.Module):
         # input_pts是从原图中采样得到的真实的pts, 此时input_pts为三维
         # 我们不需要这部分，我们自己的input_pts就是2
         
-        virtual_ray = (len(input_pts.shape) == 2)
-        if virtual_ray:
-            # add a virtual ray axis when sampling w/o rays (eg. extracting geometry, flow loss)
-            input_pts = input_pts.unsqueeze(0)
-        
         # 这里有问题，dvgo采样和后面不一样，它是每条ray均衡采样
         # dvgo stage: input_pts [8192, 396, 3]
         is_dvgo = (len(input_pts.shape) == 3)
 
         details = {"input_pts": input_pts}
+
+        if is_dvgo:
+            n_rays, n_samples, _ = input_pts.shape
+            input_pts = input_pts.view(n_rays * n_samples, 3)
 
         # fully-connected network regresses offset
         # 拿出相应帧的隐向量
@@ -144,86 +143,18 @@ class BendingNetwork(nn.Module):
         # 将最终的输出赋值给offsets
         # [n_rays * n_samples, 3]
         offsets = h
-
-        details["offsets"] = offsets
         # 形变之后的点 → 原始点 + 偏移量
         bent_points = input_pts + offsets
-        details["bent_pts"] = bent_points
 
-        if virtual_ray:
-            bent_points = bent_points.squeeze(0)
+        if is_dvgo:
+            offsets = offsets.view(n_rays, n_samples, 3)
+            bent_points = bent_points.view(n_rays, n_samples, 3)
+
+        details["offsets"] = offsets
+        details["bent_pts"] = bent_points
             
         return bent_points, details
-        '''
-    
-    # 好像可以直接用，先试试，因为长度是2还是3好像都可
-    def forward(self,
-                input_pts, # not positionally encoded! shape: (n_rays, )n_samples, 3
-                frame):
-
-        # __import__('ipdb').set_trace()
-
-        # input_pts是从原图中采样得到的真实的pts, 此时input_pts为三维
-        virtual_ray = (len(input_pts.shape) == 2)
-        if virtual_ray:
-            # add a virtual ray axis when sampling w/o rays (eg. extracting geometry, flow loss)
-            input_pts = input_pts.unsqueeze(0)
-        n_rays, n_samples, _ = input_pts.shape
-        details = {"input_pts": input_pts}
-        # 变成[n_rays*n_samples, 3]的形式
-        input_pts_flat = input_pts.view(n_rays * n_samples, 3)
-
-        # fully-connected network regresses offset
-        # 拿出相应帧的隐向量
-        latent = self.latents[frame]
-        # 扩展到 [n_rays*n_samples, 64]，即相当于每个点对应一个64的向量
-        repeat_latent = latent[None, ...].expand(n_rays * n_samples, -1)
-        # [32768, 3+64]
-        h = torch.cat([input_pts_flat, repeat_latent], -1)
-        for i, layer in enumerate(self.network):
-            # 遍历bendingnetwork的每一层
-            # 将输入过一遍网络
-            h = layer(h)
-
-            # SIREN
-            if self.activation_function.__name__ == "sin" and i == 0:
-                h *= 30.0
-
-            if (
-                i != len(self.network) - 1
-            ):  # no activation function after last layer (Relu prevents backprop if the input is zero & need offsets in positive and negative directions)
-                # 最后一层网络不过激活函数
-                h = self.activation_function(h)
-
-            if i in self.skips:
-                h = torch.cat([input_pts, h], -1)
-
-        # 将最终的输出赋值给offsets
-        # [n_rays * n_samples, 3]
-        offsets = h
-
-        # 哦~所以这个算出来的是每个点到规范场的偏移量
-        details["offsets"] = offsets.view(n_rays, n_samples, 3)
-        # 形变之后的点 → 原始点 + 偏移量
-        bent_points = (input_pts_flat + offsets).view(n_rays, n_samples, 3)  # skip connection
-        details["bent_pts"] = bent_points
-
-        '''
-        把bending latents和offsets记下来看看
-        '''
-        # __import__('ipdb').set_trace()
-
-        with open('bending_latents.txt','w+') as f:
-            str_latents = ",\n".join(["".join(str(latent.tolist())) for latent in self.latents])
-            f.write(str_latents)
-        with open('bending offsets.txt', 'w+') as f:
-            str_offsets = ",\n".join(["".join(str(offset)) for offset in offsets.tolist()])
-            f.write(str_offsets)
-
-        if virtual_ray:
-            bent_points = bent_points.squeeze(0)
-        return bent_points, details # bent_points.shape: (n_rays, )n_samples, 3
-
+        
     
     def extrapolate_scene_flow(self,
                                pts,
@@ -408,6 +339,29 @@ class BendingNetwork(nn.Module):
                             frame):
         input_pts = details["input_pts"] # shape: n_rays, n_samples, 3
         offsets = details["offsets"] # shape: n_rays, n_samples, 3
+        
+        # __import__('ipdb').set_trace()
+
+        # 若长度为2，既然是每条ray计算一个loss，我们不如变成[n, 1, 3]的格式
+        # 其实是1条ray还是n条rays应该都不是很影响
+        if len(input_pts.shape) == 2:
+            input_pts = input_pts.unsqueeze(0)
+            input_pts = input_pts.reshape(input_pts.shape[1], 1, 3)
+            offsets = offsets.unsqueeze(0)
+            offsets = offsets.reshape(offsets.shape[1], 1, 3)
+        
+        if len(input_pts.shape) - len(weights.shape) != 1:
+            weights = weights.unsqueeze(0)
+            weights = weights.reshape(weights.shape[1], 1)
+        '''
+        coarse init阶段，也就是正常阶段
+        weights [1024, 352]
+        input_pts [1024, 352, 3]
+        '''
+
+        '''
+        还是有问题，weights比input_pts还要少，因为我们coarse或者fine的过程已经筛过了
+        '''
         # Remove background samples since those aren't bent
         weights = weights.detach()[:, :offsets.shape[1]] # shape: n_rays, n_samples
         n_rays = input_pts.shape[0]
@@ -424,6 +378,7 @@ class BendingNetwork(nn.Module):
                 dim=-1
             ) # shape: n_rays
         else:
+            # 这是要一条ray计算一个offset
             offset_loss = torch.zeros(n_rays)
             for i in [-1, 1]: # direct neighbouring frames
                 neighbour = frame + i
@@ -449,6 +404,15 @@ class BendingNetwork(nn.Module):
                                 frame):
         input_pts = details["input_pts"] # shape: n_rays, n_samples, 3
         # Remove background samples since those aren't bent
+        # 若长度为2，既然是每条ray计算一个loss，我们不如变成[n, 1, 3]的格式
+        # 其实是1条ray还是n条rays应该都不是很影响
+        if len(input_pts.shape) == 2:
+            input_pts = input_pts.unsqueeze(0)
+            input_pts = input_pts.reshape(input_pts.shape[1], 1, 3)
+        if len(input_pts.shape) - len(weights.shape) != 1:
+            weights = weights.unsqueeze(0)
+            weights = weights.reshape(weights.shape[1], 1)
+        
         weights = weights[:, :input_pts.shape[1]].contiguous() # shape: n_rays, n_samples
         n_rays = input_pts.shape[0]
         return self._compute_divergence_loss(
@@ -482,6 +446,10 @@ class BendingNetwork(nn.Module):
 
     def _viewdirs_via_finite_differences(self,
                                         input_pts): # n_rays, n_samples, 3
+        # 为了保证正确性，若input_pts是2维的，我们unsqueeze一下
+        if len(input_pts.shape) == 2:
+            input_pts = input_pts.unsqueeze(0)
+
         eps = 0.000001
         difference_type = "backward"
         if difference_type == "central":
