@@ -32,7 +32,7 @@ data = dict(
 ''' Template of training options
 '''
 coarse_train = dict(
-    N_iters=10000, #10000,                # number of optimization steps
+    N_iters=1000, #10000,                # number of optimization steps
     N_rand=1024, #8192,                  # batch size (number of random rays per optimization step)
     lrate_density=1e-1,           # lr of density voxel grid
     lrate_k0=1e-1,                # lr of color/feature voxel grid
@@ -51,7 +51,7 @@ coarse_train = dict(
     weight_tv_k0=0.0,             # weight of total variation loss of color/feature voxel grid
     pg_scale=[],                  # checkpoints for progressive scaling
 
-    save_iter=10000, #10000,
+    save_iter=1000, #10000,
 
     bending_increasing = True,
     flow_weight = 0.0, 

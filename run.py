@@ -622,7 +622,8 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     logger.info("start: {} end: {}".format(1 + start, 1 + cfg_train.N_iters))
 
     for global_step in trange(1+start, 1+cfg_train.N_iters):
-
+        
+        # __import__('ipdb').set_trace()
         # progress scaling checkpoint
         if global_step in cfg_train.pg_scale:
             # coarse阶段不进该分支，fine阶段也没进
@@ -654,8 +655,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             rays_d = rays_d_tr[sel_i]
             viewdirs = viewdirs_tr[sel_i]
             '''
+            # sel_b是在imsz中的位置，并不是frame，imsz与i_train等长，可以以此获得frame
             sel_b = torch.randint(len(imsz), [1])
-            frame = sel_b[0]
+            frame = i_train[sel_b[0]]
             # 这张图有多少个有效采样点
             n = imsz[sel_b]
             # 通过sum得到起始点
@@ -1035,6 +1037,7 @@ def train(args, cfg, data_dict):
         logger.info("+ "*10 + 'train: coarse geometry searching in' + eps_time_str + " +"*10 )
 
     coarse_expname = cfg.expname0 + '/coarse'
+    # 这里定义了coarse_ckpt_path，所以fine阶段和coarse阶段都用load这个
     coarse_ckpt_path = os.path.join(cfg.basedir, coarse_expname, f'coarse_last.tar')
     logger.info("+ "*10 + 'coarse_expname' + coarse_expname + " +"*10)
 

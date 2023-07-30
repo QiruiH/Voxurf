@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch_scatter import segment_coo
 from torch.utils.cpp_extension import load
+import copy
 
 from . import grid
 from lib.dvgo_ori import extract_geometry
@@ -152,6 +153,7 @@ class Voxurf(torch.nn.Module):
         '''
         self.template_frames = -1
         self.bending_network = None
+        self.bending_latents_list = None
         if 'bending_network' in kwargs:
             self.bending_network = self.mask_cache.bending_network
             self.bending_latents_list = self.mask_cache.bending_latents_list
@@ -380,7 +382,11 @@ class Voxurf(torch.nn.Module):
         else:
             s_val = 0
 
-        dirs = viewdirs[ray_id]
+        # __import__('ipdb').set_trace()
+
+        # dirs = viewdirs[ray_id] # 原版
+        # 我们现在本来就是每个点都有一个viewdirs了
+        dirs = viewdirs
         inv_s = torch.ones(1).cuda() / self.s_val
         assert use_mid
         if use_mid:
@@ -586,8 +592,7 @@ class Voxurf(torch.nn.Module):
         原来是每条ray对应一个viewdirs
         '''
         viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
-        viewdirs = viewdirs.squeeze(0)
-
+        
         sdf = self.grid_sampler(ray_pts, sdf_grid)
         self.gradient = self.neus_sdf_gradient(sdf=self.sdf.grid)
         gradient = self.grid_sampler(ray_pts, self.gradient)
@@ -774,20 +779,6 @@ class MaskCache(nn.Module):
         self.nearest = st['MaskCache_kwargs'].get('nearest', False)
         # 把隐向量拿出来
         self.bending_latents_list = st['bending_latents_list']
-        # bending network的也拿出来吧，但不知道这个方式行不行
-        '''
-        self.bending_network = dict(
-            bending_network_0_weight = st['model_state_dict']['bending_network.network.0.weight'],
-            bending_network_0_bias   = st['model_state_dict']['bending_network.network.0.bias'],
-            bending_network_1_weight = st['model_state_dict']['bending_network.network.1.weight'],
-            bending_network_1_bias   = st['model_state_dict']['bending_network.network.1.bias'],
-            bending_network_2_weight = st['model_state_dict']['bending_network.network.2.weight'],
-            bending_network_2_bias   = st['model_state_dict']['bending_network.network.2.bias'],
-            bending_network_3_weight = st['model_state_dict']['bending_network.network.3.weight'],
-            bending_network_3_bias   = st['model_state_dict']['bending_network.network.3.bias'],
-            bending_network_4_weight = st['model_state_dict']['bending_network.network.4.weight']
-        )
-        '''
         self.bending_network = st['bending_network']
 
     @torch.no_grad()

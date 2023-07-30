@@ -61,13 +61,13 @@ surf_train=dict(
         n_layers = 5,
     ),
 
-    bending_network_train=dict(
-        bending_increasing = True,
-        zero_init = True,
-        flow_weight = 0.0, 
-        divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
-        offset_weight = 20000.0
-    ),
+    # bending_network_train=dict(
+    bending_increasing = True,
+    zero_init = True,
+    flow_weight = 0.0, 
+    divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
+    offset_weight = 20000.0
+    # ),
 )
 
 surf_model_and_render=dict(
@@ -99,4 +99,19 @@ surf_model_and_render=dict(
     stepsize=0.5,
     s_ratio=50,
     s_start=0.05,
+
+    # bending network 相关的参数都先加到这里
+    bending_network=dict(
+        latent_dim = 64,
+        d_hidden = 64,
+        n_layers = 5,
+    ),
+
+    bending_network_train=dict(
+        bending_increasing = True,
+        zero_init = True,
+        flow_weight = 0.0, 
+        divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
+        offset_weight = 20000.0
+    ),
 )

@@ -447,7 +447,8 @@ class BendingNetwork(nn.Module):
     def _viewdirs_via_finite_differences(self,
                                         input_pts): # n_rays, n_samples, 3
         # 为了保证正确性，若input_pts是2维的，我们unsqueeze一下
-        if len(input_pts.shape) == 2:
+        need_unsqueeze = (len(input_pts.shape) == 2)
+        if need_unsqueeze:
             input_pts = input_pts.unsqueeze(0)
 
         eps = 0.000001
@@ -486,6 +487,9 @@ class BendingNetwork(nn.Module):
         else:
             raise RuntimeError("invalid difference_type")
 
+        if need_unsqueeze:
+            input_views = input_views.squeeze(0)
+            
         return input_views
 
     # from FFJORD github code: https://github.com/rtqichen/ffjord
