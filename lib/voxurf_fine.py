@@ -194,6 +194,7 @@ class Voxurf(torch.nn.Module):
 
         # __import__('ipdb').set_trace()
         
+        '''
         self.template_frames = -1
         self.bending_network = None
         self.bending_latents_list = None
@@ -206,20 +207,33 @@ class Voxurf(torch.nn.Module):
             # self._set_nonempty_mask()
             self.bending_network = self.bn_cache.bending_network
             self.bending_latents_list = self.bn_cache.bending_latents_list
-
+        '''
+        
         # Using the coarse geometry if provided (used to determine known free space and unknown space)
         # 这里path还是coarse_last.tar，所以load的还是coarse init阶段的存档点
-        self.mask_cache_path = mask_cache_path
+        # 这里我们直接load surf_last来当存档点试试
+        mask_cache_path_surf = mask_cache_path.replace('coarse_last', 'surf_last')
+        self.mask_cache_path = mask_cache_path_surf # 这里也改了
         self.mask_cache_thres = mask_cache_thres
         if mask_cache_path is not None and mask_cache_path:
             self.mask_cache = MaskCache(
-                    path=mask_cache_path,
+                    path=mask_cache_path_surf, # 这里改了
                     mask_cache_thres=mask_cache_thres).to(self.xyz_min.device)
             self._set_nonempty_mask()
         else:
             self.mask_cache = None
             self.nonempty_mask = None
 
+        '''
+        添加bending network
+        '''
+        self.template_frames = -1
+        self.bending_network = None
+        self.bending_latents_list = None
+        if 'bending_network' in kwargs:
+            self.bending_network = self.mask_cache.bending_network
+            self.bending_latents_list = self.mask_cache.bending_latents_list
+        
         # grad conv to calculate gradient
         self.init_gradient_conv()
         self.grad_mode = grad_mode
@@ -565,10 +579,14 @@ class Voxurf(torch.nn.Module):
         # __import__('ipdb').set_trace()
 
         '''
-        xyz 是ray_pts
+        xyz 是ray_pts, 
         shape [136361]
         ind_norm [1, 1, 1, 136361, 3]
         grid_size [82, 216, 229]
+
+        zhj:
+        xyz: [1, 1, 1, 846461, 3]
+        grids: len 为1的tuple, grids[0].shape: [1, 1, 81, 198, 251]
         '''
         shape = xyz.shape[:-1]
         xyz = xyz.reshape(1,1,1,-1,3)
@@ -577,31 +595,38 @@ class Voxurf(torch.nn.Module):
         # ind from xyz to zyx !!!!!
         # ind_norm不含nan值
         # 这是要算啥
-        ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
+        ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1  # scale to [-1, 1] 
         grid_size = grid.size()[-3:]
         size_factor_zyx = torch.tensor([grid_size[2], grid_size[1], grid_size[0]]).cuda()
         ind = ((ind_norm + 1) / 2) * (size_factor_zyx - 1)
         offset = torch.tensor([[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]]).cuda()
         displace = torch.tensor(displace_list).cuda()
-        offset = offset[:, None, :] * displace[None, :, None]
+        offset = offset[:, None, :] * displace[None, :, None] # shape: [6, 1, 3]
         
         all_ind = ind.unsqueeze(-2) + offset.view(-1, 3)
         all_ind = all_ind.view(1, 1, 1, -1, 3)
-        all_ind[..., 0] = all_ind[..., 0].clamp(min=0, max=size_factor_zyx[0] - 1)
-        all_ind[..., 1] = all_ind[..., 1].clamp(min=0, max=size_factor_zyx[1] - 1)
-        all_ind[..., 2] = all_ind[..., 2].clamp(min=0, max=size_factor_zyx[2] - 1)
+        
+        # Bug here: add following line 
+        all_ind_old = all_ind.clone()
+        all_ind[..., 0] = all_ind_old[..., 0].clamp(min=0, max=size_factor_zyx[0] - 1)
+        all_ind[..., 1] = all_ind_old[..., 1].clamp(min=0, max=size_factor_zyx[1] - 1)
+        all_ind[..., 2] = all_ind_old[..., 2].clamp(min=0, max=size_factor_zyx[2] - 1)
         
         all_ind_norm = (all_ind / (size_factor_zyx-1)) * 2 - 1
         feat = F.grid_sample(grid, all_ind_norm, mode=mode, align_corners=align_corners)
         
+        # zhj: NOTE: grad_fn 为 AsStridedBackward0, bug 报错是这里
         all_ind = all_ind.view(1, 1, 1, -1, 6, len(displace_list), 3)
         # diff中有0
         diff = all_ind[:, :, :, :, 1::2, :, :] - all_ind[:, :, :, :, 0::2, :, :]
+
+        diff = diff + 1e-5
+
         diff, _ = diff.max(dim=-1)
         # 我们先暴力解决掉这个问题
-        diff = diff + 1e-6
+        # diff = diff + 1e-6
 
-        __import__('ipdb')
+        # __import__('ipdb').set_trace()
         feat_ = feat.view(1, 1, 1, -1, 6, len(displace_list))
         feat_diff = feat_[:, :, :, :, 1::2, :] - feat_[:, :, :, :, 0::2, :]
         grad = feat_diff / diff / self.voxel_size
@@ -614,6 +639,8 @@ class Voxurf(torch.nn.Module):
         
         feat = feat.view(shape[-1], 6 * len(displace_list))
         grad = grad.view(shape[-1], 3 * len(displace_list))
+
+        # __import__('ipdb').set_trace()
         
         return feat, grad
 
@@ -664,21 +691,24 @@ class Voxurf(torch.nn.Module):
         rays_o = rays_o.contiguous()
         rays_d = rays_d.contiguous()
         stepdist = stepsize * self.voxel_size
+        # render train的图片，过完这里后ray_pts还是[8192, 3]，每条ray只采样了一个点
+        # print("rays_o: {}, rays_d: {}".format(rays_o, rays_d))
         ray_pts, mask_outbbox, ray_id, step_id, N_steps, t_min, t_max = render_utils_cuda.sample_pts_on_rays(
             rays_o, rays_d, self.xyz_min, self.xyz_max, near, far, stepdist)
         # correct the cuda output N_steps, which could have a bias of 1 randomly
         N_steps = ray_id.unique(return_counts=True)[1]
         mask_inbbox = ~mask_outbbox
+        # 所有点全被mask掉了，变成空了
         ray_pts = ray_pts[mask_inbbox]
         ray_id = ray_id[mask_inbbox]
         step_id = step_id[mask_inbbox]
         return ray_pts, ray_id, step_id, mask_outbbox, N_steps
 
 
-    def forward(self, rays_o, rays_d, viewdirs, frame, global_step=None, **render_kwargs):
+    def forward(self, rays_o, rays_d, viewdirs, frame, global_step=None, is_train=True, **render_kwargs):
         '''Volume rendering'''
 
-        __import__('ipdb').set_trace()
+        # __import__('ipdb').set_trace()
 
         ret_dict = {}
         N = len(rays_o)
@@ -694,21 +724,85 @@ class Voxurf(torch.nn.Module):
         # interval = render_kwargs['stepsize'] * self.voxel_size_ratio
         gradient, gradient_error = None, None
 
+        # 加一个保护措施,观察一下是否所有采样点都进这个分支
+        # if ray_pts.shape[0] == 0:
+        #     # ['rgb_marched', 'disp', 'alphainv_cum', 'normal_marched']
+        #     alphainv_cum = torch.Tensor(np.zeros(rays_o.shape[0]))
+        #     rgb_marched = torch.Tensor(np.zeros(rays_o.shape))
+        #     normal_marched = torch.Tensor(np.zeros(rays_o.shape))
+        #     disp = torch.Tensor(np.zeros(rays_o.shape[0]))
+# 
+        #     ret_dict = dict({
+        #         'alphainv_cum': alphainv_cum,
+        #         'rgb_marched': rgb_marched,
+        #         'normal_marched': normal_marched,
+        #         'disp': disp
+        #     })
+# 
+        #     return ret_dict
+
+        if ray_pts.shape[0] == 0:
+            __import__('ipdb').set_trace()
+            
+        # 或许我们应该把形变网络提到前面来，因为要mask的时候就已经需要ray_pts了
+        ray_pts, bending_details = self.bending_network(ray_pts, frame)    
+        viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+        # 我们的viewdirs和ray_pts是一一对应的，所以直接跟ray_pts一起mask就行了
+
         if self.mask_cache is not None:
             # mask过滤一遍
             mask = self.mask_cache(ray_pts)
+            # validate 的时候是这里出了问题，过完mask之后什么都没有了
+            '''
+            ipdb> ray_pts.shape
+            torch.Size([0, 3])
+            ipdb> ray_pts
+            tensor([], size=(0, 3))
+            '''
+            # 91: ray_pts过完就剩一个了
             ray_pts = ray_pts[mask]
             ray_id = ray_id[mask]
             step_id = step_id[mask]
             mask_outbbox[~mask_outbbox] |= ~mask
+            viewdirs = viewdirs[mask]
+            bending_details['input_pts'] = bending_details['input_pts'][mask]
+            bending_details['offsets'] = bending_details['offsets'][mask]
+            bending_details['bent_pts'] = bending_details['bent_pts'][mask]
 
+
+        # 加一个保护措施,观察一下是否所有采样点都进这个分支
+        # if ray_pts.shape[0] == 0:
+        #     # ['rgb_marched', 'disp', 'alphainv_cum', 'normal_marched']
+        #     alphainv_cum = torch.Tensor(np.zeros(rays_o.shape[0]))
+        #     rgb_marched = torch.Tensor(np.zeros(rays_o.shape))
+        #     normal_marched = torch.Tensor(np.zeros(rays_o.shape))
+        #     disp = torch.Tensor(np.zeros(rays_o.shape[0]))
+# 
+        #     ret_dict = dict({
+        #         'alphainv_cum': alphainv_cum,
+        #         'rgb_marched': rgb_marched,
+        #         'normal_marched': normal_marched,
+        #         'disp': disp
+        #     })
+# 
+        #     return ret_dict
+        
         sdf_grid = self.smooth_conv(self.sdf.grid) if self.smooth_sdf else self.sdf.grid
 
         '''
         这里应该加bending network了，要用pts来查询sdf了
+        zhj: 计算之后具有 grad_fn
         '''
-        ray_pts, bending_details = self.bending_network(ray_pts, frame)
-        viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+        # print('ray_pts', ray_pts.shape) # [N, 3]
+        # print('viewdirs', viewdirs.shape)
+
+        # ray_pts, bending_details = self.bending_network(ray_pts, frame)
+        # viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+
+        # print('ray_pts', ray_pts.shape)
+        # print('viewdirs', viewdirs.shape)
+        # for k,v in bending_details.items():
+            # print(k, v.shape)
         
         '''
         这里的gradient已经开始出现nan了，sdf和feat都没有nan
@@ -726,9 +820,11 @@ class Voxurf(torch.nn.Module):
         '''
 
         dist = render_kwargs['stepsize'] * self.voxel_size
+
+        # __import__('ipdb').set_trace()
+
         s_val, alpha = self.neus_alpha_from_sdf_scatter(viewdirs, ray_id, dist, sdf, gradient, global_step=global_step,
                                                  is_train=global_step is not None, use_mid=True)
-        
 
         mask = None
         if self.fast_color_thres > 0:
@@ -740,11 +836,13 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             gradient = gradient[mask] # merge to sample once
             sdf = sdf[mask]
+            viewdirs = viewdirs[mask]
             bending_details['input_pts'] = bending_details['input_pts'][mask]
             bending_details['offsets'] = bending_details['offsets'][mask]
             bending_details['bent_pts'] = bending_details['bent_pts'][mask]
 
-        
+        # __import__('ipdb').set_trace()
+
         '''
         下面就是渲染了
         '''
@@ -752,13 +850,22 @@ class Voxurf(torch.nn.Module):
         # compute accumulated transmittance
         if ray_id.ndim == 2:
             print(mask, alpha, ray_id)
-            mask = mask.squeeze()
-            alpha = alpha.squeeze()
-            ray_id = ray_id.squeeze()
-            ray_pts = ray_pts.squeeze()
-            step_id = step_id.squeeze()
-            gradient = gradient.squeeze()
-            sdf = sdf.squeeze()
+            mask = mask.squeeze(0)
+            alpha = alpha.squeeze(0)
+            ray_id = ray_id.squeeze(0)
+            ray_pts = ray_pts.squeeze(0)
+            step_id = step_id.squeeze(0)
+            gradient = gradient.squeeze(0)
+            sdf = sdf.squeeze(0)
+
+        if alpha.dim() == 0:
+            # __import__('ipdb').set_trace()
+            alpha = alpha.unsqueeze(0)
+            # ray_id = ray_id.unsqueeze(0)
+
+        if ray_id.dim() != 1:
+            __import__('ipdb').set_trace()
+
 
         weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
         if self.fast_color_thres > 0:
@@ -770,6 +877,7 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             gradient = gradient[mask]
             sdf = sdf[mask]
+            viewdirs = viewdirs[mask]
             bending_details['input_pts'] = bending_details['input_pts'][mask]
             bending_details['offsets'] = bending_details['offsets'][mask]
             bending_details['bent_pts'] = bending_details['bent_pts'][mask]
@@ -794,6 +902,7 @@ class Voxurf(torch.nn.Module):
             # 上面改成coarse阶段的写法后没有nan了，但这里没有影响
             # coarse阶段没有这部分，没有参考了，救命
             all_feat, all_grad = self.sample_sdfs(ray_pts, sdf_grid, displace_list=all_grad_inds_, use_grad_norm=self.use_grad_norm)
+            # __import__('ipdb').set_trace()
         else:
             all_feat, all_grad = None, None
         
@@ -809,11 +918,14 @@ class Voxurf(torch.nn.Module):
         
         if self.use_rgbnet_k0:
             rgb_feat = torch.cat([
-                k0, xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id]
+                # k0, xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                k0, xyz_emb, viewdirs_emb.flatten(0, -2)
             ], -1)
         else:
+            # 228这里会出错
             rgb_feat = torch.cat([
-                xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id]
+                # xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                xyz_emb, viewdirs_emb.flatten(0, -2)
             ], -1)
 
         hierarchical_feats = []
@@ -838,7 +950,8 @@ class Voxurf(torch.nn.Module):
             k_viewdirs_emb = (viewdirs.unsqueeze(-1) * self.k_viewfreq).flatten(-2)
             k_viewdirs_emb = torch.cat([viewdirs, k_viewdirs_emb.sin(), k_viewdirs_emb.cos()], -1)
             k_rgb_feat = torch.cat([
-                k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)[ray_id]
+                # k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)
             ], -1)
 
             assert len(self.k_grad_feat) == 1 and self.k_grad_feat[0] == 1.0
@@ -874,6 +987,7 @@ class Voxurf(torch.nn.Module):
         rgb_marched = segment_coo(
             src=(weights.unsqueeze(-1) * rgb),
             index=ray_id, out=torch.zeros([N, 3]), reduce='sum') + alphainv_last[..., None] * render_kwargs['bg']
+        # __import__('ipdb').set_trace()
 
         if gradient is not None and render_kwargs.get('render_grad', False):
             normal = gradient / (gradient.norm(2, -1, keepdim=True) + 1e-6)
@@ -893,15 +1007,20 @@ class Voxurf(torch.nn.Module):
             disp = 0
 
         # 计算bending network loss
-        if self.bending_network is not None:
+        if self.bending_network is not None and is_train:
             # Losses specific to the bending network
             # 计算loss，具体算法没细看，应该是对论文的复现
                 # 这两个loss应该就是bending network相关的loss
+            
             offset_loss = self.bending_network.compute_offset_loss(
                 bending_details,
                 weights,
                 frame
             )
+            # 运行到这的时候会报错
+            # bug: RuntimeError: element 0 of tensors does not require grad and does not have a grad_fn
+            # __import__('ipdb').set_trace()
+
             divergence_loss = self.bending_network.compute_divergence_loss(
                 bending_details,
                 weights,
@@ -909,6 +1028,12 @@ class Voxurf(torch.nn.Module):
             )
             offset_loss = torch.mean(offset_loss)
             divergence_loss = torch.mean(divergence_loss)
+
+            ret_dict.update({
+                'offset_loss': offset_loss,
+                'divergence_loss': divergence_loss
+            })
+            
         
         ret_dict.update({
             'alphainv_cum': alphainv_last,
@@ -925,8 +1050,6 @@ class Voxurf(torch.nn.Module):
             'gradient': gradient,
             "gradient_error": gradient_error,
             "s_val": s_val,
-            'offset_loss': offset_loss,
-            'divergence_loss': divergence_loss
         })
         if self.use_rgb_k:
             ret_dict.update({
@@ -955,7 +1078,7 @@ class Voxurf(torch.nn.Module):
             all_grad_inds = sorted(all_grad_inds)
             all_grad_inds_ = deepcopy(all_grad_inds)
 
-            __import__('ipdb').set_trace()
+            # __import__('ipdb').set_trace()
             all_feat, all_grad = self.sample_sdfs(ray_pts, sdf_grid,
                                                   displace_list=all_grad_inds_,
                                                   use_grad_norm=self.use_grad_norm)
@@ -1070,6 +1193,9 @@ class MaskCache(nn.Module):
     def forward(self, xyz):
         shape = xyz.shape[:-1]
         xyz = xyz.reshape(1,1,1,-1,3)
+
+        # __import__('ipdb').set_trace()
+
         ind_norm = ((xyz - self.xyz_min) / (self.xyz_max - self.xyz_min)).flip((-1,)) * 2 - 1
         if self.nearest:
             density = F.grid_sample(self.density, ind_norm, align_corners=True, mode='nearest')
@@ -1078,6 +1204,11 @@ class MaskCache(nn.Module):
             density = F.grid_sample(self.density, ind_norm, align_corners=True)
             alpha = 1 - torch.exp(-F.softplus(density + self.act_shift) * self.voxel_size_ratio)
         alpha = alpha.reshape(*shape)
+        '''
+        ipdb> alpha 这里的alpha都好小
+        tensor([9.5367e-07, 9.5367e-07, 9.5367e-07,  ..., 9.5367e-07, 9.5367e-07,
+                9.5367e-07])
+        '''
         return (alpha >= self.mask_cache_thres)
 
 
@@ -1120,6 +1251,7 @@ def total_variation_step2(v, mask=None):
 class Alphas2Weights(torch.autograd.Function):
     @staticmethod
     def forward(ctx, alpha, ray_id, N):
+        # 这里算alpha
         weights, T, alphainv_last, i_start, i_end = render_utils_cuda.alpha2weight(alpha, ray_id, N)
         if alpha.requires_grad:
             ctx.save_for_backward(alpha, weights, T, alphainv_last, i_start, i_end)

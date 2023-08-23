@@ -129,7 +129,7 @@ class BendingNetwork(nn.Module):
 
             # SIREN
             if self.activation_function.__name__ == "sin" and i == 0:
-                h *= 30.0
+                h = 30.0 * h
 
             if (
                 i != len(self.network) - 1
@@ -337,7 +337,9 @@ class BendingNetwork(nn.Module):
                             details,
                             weights,
                             frame):
+        # 原始的坐标
         input_pts = details["input_pts"] # shape: n_rays, n_samples, 3
+        # 每个坐标对应的偏移量
         offsets = details["offsets"] # shape: n_rays, n_samples, 3
         
         # __import__('ipdb').set_trace()
@@ -361,6 +363,7 @@ class BendingNetwork(nn.Module):
 
         '''
         还是有问题，weights比input_pts还要少，因为我们coarse或者fine的过程已经筛过了
+        所以每次筛选的时候把details直接也筛选掉就好了
         '''
         # Remove background samples since those aren't bent
         weights = weights.detach()[:, :offsets.shape[1]] # shape: n_rays, n_samples
@@ -378,12 +381,15 @@ class BendingNetwork(nn.Module):
                 dim=-1
             ) # shape: n_rays
         else:
+            # 我们在训练中一直走的这个分支
             # 这是要一条ray计算一个offset
             offset_loss = torch.zeros(n_rays)
             for i in [-1, 1]: # direct neighbouring frames
+                # frame的左右相邻两帧
                 neighbour = frame + i
                 if neighbour < 0 or neighbour >= self.n_frames:
                     continue
+                # 原始pts在邻居帧下的offsets
                 _, neighbour_details = self.forward(input_pts, neighbour)
                 neighbour_offsets = neighbour_details["offsets"].detach()
                 offset_loss += torch.mean(

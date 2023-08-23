@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from datetime import datetime
 
 from lib import utils, dtu_eval
-# from torch.utils.tensorboard import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 from lib.load_data import load_data
 from lib.utils import rgb_to_luminance, get_sobel, calc_grad, \
     GradLoss, write_ply, load_point_cloud, get_root_logger
@@ -22,6 +22,9 @@ from torch_efficient_distloss import flatten_eff_distloss
 from scipy.spatial.transform import Rotation as Rot
 from scipy.spatial.transform import Slerp
 
+torch.autograd.set_detect_anomaly(True)
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 def config_parser():
     '''Define command line arguments
@@ -59,7 +62,7 @@ def config_parser():
     # logging/saving options
     parser.add_argument("--i_print", type=int, default=100,
                         help='frequency of console printout and metric loggin')
-    parser.add_argument("--i_validate", type=int, default=10000)
+    parser.add_argument("--i_validate", type=int, default=1000) #10000)
     parser.add_argument("--i_weights", type=int, default=10000,
                         help='frequency of weight ckpt saving')
     parser.add_argument("-s", "--suffix", type=str, default="",
@@ -82,9 +85,13 @@ def config_parser():
 def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
                       gt_imgs=None, masks=None, savedir=None, render_factor=0, idx=None,
                       eval_ssim=True, eval_lpips_alex=True, eval_lpips_vgg=True,
-                      use_bar=True, step=0, rgb_only=False):
+                      use_bar=True, step=0, rgb_only=False, frame=-1):
     '''Render images for the given viewpoints; run evaluation if gt given.
     '''
+
+    # render_poses['far'] = 2.7395265, 是正常的
+    # __import__('ipdb').set_trace()
+
     assert len(render_poses) == len(HW) and len(HW) == len(Ks)
 
     if render_factor!=0:
@@ -121,10 +128,39 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
         rays_o = rays_o.flatten(0, -2)
         rays_d = rays_d.flatten(0, -2)
         viewdirs = viewdirs.flatten(0, -2)
+
+        # __import__('ipdb').set_trace()
+        '''
+        model -> Voxurf
+        IndexError: index 0 is out of bounds for dimension 1 with size 0
+
+        ipdb> keys
+        ['rgb_marched', 'disp', 'alphainv_cum', 'normal_marched']
+        '''
+        # 这里好怪啊，单次跟几轮循环都是可以的，但是就是没法运行完
         render_result_chunks = [
-            {k: v for k, v in model(ro, rd, vd, **render_kwargs).items() if k in keys}
+            {k: v for k, v in model(ro, rd, vd, frame, is_train=False, **render_kwargs).items() if k in keys}
             for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
         ]
+        # 为了方便debug我们先换一种写法
+        '''
+        i = 0
+        for ro, rd, vd in zip(rays_o.split(1024, 0), rays_d.split(1024, 0), viewdirs.split(1024, 0)):
+            
+            print("#----------i:{}-----------#".format(i))
+            if i == 228:
+                # __import__('ipdb').set_trace()
+            
+            res = model(ro, rd, vd, frame, is_train=False, **render_kwargs)
+            render_result_chunks = [
+                {k: v for k, v in res.items() if k in keys}
+            ]
+
+            i = i + 1
+        '''
+        
+        # __import__('ipdb').set_trace()
+
         render_result = {
             k: torch.cat([ret[k] for ret in render_result_chunks]).reshape(H,W,-1)
             for k in render_result_chunks[0].keys()
@@ -340,6 +376,7 @@ def compute_bbox_by_cam_frustrm(args, cfg, HW, Ks, poses, i_train, near, far, **
 
 @torch.no_grad()
 def compute_bbox_by_coarse_geo(model_class, model_path, thres):
+    # 这里还是用的coarse_last.tar算的，不是surf_last.tar，不是特别懂
     logger.info('compute_bbox_by_coarse_geo: start')
     eps_time = time.time()
 
@@ -384,6 +421,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         xyz_min -= xyz_shift
         xyz_max += xyz_shift
     # 从之前处理的数据字典中得到需要的数据
+    # 到这里far也是正常的
     HW, Ks, near, far, i_train, i_val, i_test, poses, render_poses, images, masks = [
         data_dict[k] for k in [
             'HW', 'Ks', 'near', 'far', 'i_train', 'i_val', 'i_test', 'poses', 'render_poses', 'images', 'masks'
@@ -596,6 +634,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     # __import__('ipdb').set_trace()
 
     rgb_tr, rays_o_tr, rays_d_tr, viewdirs_tr, imsz, batch_index_sampler = gather_training_rays()
+    # __import__('ipdb').set_trace()
     
     if cfg_train.pervoxel_lr:
         # coarse init的时候会进这个分支，初始化每个voxel网格
@@ -621,8 +660,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
     time0 = time.time()
     logger.info("start: {} end: {}".format(1 + start, 1 + cfg_train.N_iters))
 
-    for global_step in trange(1+start, 1+cfg_train.N_iters):
-        
+    for global_step in trange(1+start, 1+cfg_train.N_iters):        
         # __import__('ipdb').set_trace()
         # progress scaling checkpoint
         if global_step in cfg_train.pg_scale:
@@ -632,6 +670,8 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             else:
                 model.scale_volume_grid(model.num_voxels * scale_ratio)
             optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
+
+        optimizer.zero_grad(set_to_none=True)
 
         # 添加frame
         frame = 0
@@ -735,6 +775,10 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         # volume rendering
         '''
         coarse阶段的init部分这里调DirectVoxGO()模型的forward函数
+        
+        zhj:
+        # rays_o, requires_grad is True
+        rays_o,rays_d, viewdirs, requires_grad is False
         '''
         render_result = model(rays_o, rays_d, viewdirs, frame, global_step=global_step, **render_kwargs)
 
@@ -747,13 +791,15 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         # __import__('ipdb').set_trace()
 
         # gradient descent step
-        optimizer.zero_grad(set_to_none=True)
+        # optimizer.zero_grad(set_to_none=True)
         loss = cfg_train.weight_main * F.mse_loss(render_result['rgb_marched'], target)
         psnr = utils.mse2psnr(loss.detach()).item()
 
+        writer.add_scalar('train/rgb_loss', loss, global_step)
+
         # 计算loss
         # 加上bending network的loss
-        if cfg.bending_network:
+        if cfg.bending_network is not None:
             offset_loss = render_result['offset_loss']
             divergence_loss = render_result['divergence_loss']
             bending_losses = offset_loss * cfg_train.offset_weight \
@@ -797,7 +843,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             loss += F.mse_loss(render_result['rgb_marched0'], target) * cfg_train.weight_rgb0
 
         
-        loss.backward()
+        loss.backward(retain_graph=True)
         '''
         for key, param in model.bending_network.named_parameters():
             print(key, ' : ',param.grad)
@@ -840,9 +886,14 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                 bg_mask_lst.append(render_result['bg_mask'].float().mean().detach().cpu().numpy())
         s_val = render_result["s_val"] if "s_val" in render_result else 0
         s_val_lst.append(s_val)
-        # writer.add_scalar('train/psnr', psnr, global_step)
-        # writer.add_scalar('train/s_val', s_val, global_step)
-        # writer.add_scalar('train/mask', mask_lst[-1], global_step)
+
+        writer.add_scalar('train/psnr', psnr, global_step)
+        writer.add_scalar('train/s_val', s_val, global_step)
+        writer.add_scalar('train/mask', mask_lst[-1], global_step)
+        writer.add_scalar('train/offset_loss', offset_loss, global_step)
+        writer.add_scalar('train/divergence_loss', divergence_loss, global_step)
+        writer.add_scalar('train/bending_losses', bending_losses, global_step)
+
 
         global_step_ = global_step - 1
         # update lr
@@ -938,8 +989,34 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             psnr_lst, weight_lst, weight_sum_lst, weight_nonzero_lst, mask_lst, bg_mask_lst, s_val_lst = [], [], [], [], [], [], []
 
         # validate image
+        '''
+        我们能不能试试在这对每一个图片做渲染呢
+        '''
+        # render_viewpoints_kwargs = {
+        #         'model': model,
+        #         'ndc': cfg.data.ndc,
+        #         'render_kwargs': {
+        #             'near': data_dict['near'],
+        #             'far': data_dict['far'],
+        #             'bg': 1 if cfg.data.white_bkgd else 0,
+        #             'stepsize': cfg_model.stepsize,
+        #             'inverse_y': cfg.data.inverse_y,
+        #             'flip_x': cfg.data.flip_x,
+        #             'flip_y': cfg.data.flip_y,
+        #             'render_grad': True,
+        #             'render_depth': True,
+        #             'render_in_out': True,
+        #         },
+        #     }
+        # validate_image(cfg, stage, global_step, data_dict, render_viewpoints_kwargs, eval_all=cfg_train.N_iters==global_step, frame=frame)
+
+
         # args.i_validate = 10000，且在fine的阶段才行
         if global_step%args.i_validate==0 and global_step != cfg_train.N_iters and stage == 'surf' and 'fine' in args.sdf_mode:
+            
+            # pass
+            # __import__('ipdb').set_trace()
+
             render_viewpoints_kwargs = {
                 'model': model,
                 'ndc': cfg.data.ndc,
@@ -956,7 +1033,11 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                     'render_in_out': True,
                 },
             }
-            validate_image(cfg, stage, global_step, data_dict, render_viewpoints_kwargs, eval_all=cfg_train.N_iters==global_step)
+            try:
+                # 先避一避调调参吧
+                validate_image(cfg, stage, global_step, data_dict, render_viewpoints_kwargs, eval_all=cfg_train.N_iters==global_step, frame=frame)
+            except:
+                pass
 
         # validate mesh
         prefix = args.prefix + '_' if args.prefix else ''
@@ -1058,6 +1139,9 @@ def train(args, cfg, data_dict):
     # __import__('ipdb').set_trace()
 
     if hasattr(cfg, 'surf_train'):
+
+        # 我们先把coarse init阶段调通，最起码loss不要上升
+        # __import__('ipdb').set_trace()
         # coarse阶段也会进这个分支
         # fine阶段进入这个分支
         eps_surf = time.time()
@@ -1076,22 +1160,57 @@ def train(args, cfg, data_dict):
         eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
         logger.info('train: finish (eps time' + eps_time_str + ')')
 
-def validate_image(cfg, stage, step, data_dict, render_viewpoints_kwargs, eval_all=True):
+def validate_image_old(cfg, stage, step, data_dict, render_viewpoints_kwargs, eval_all=True):
     testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{stage}')
     os.makedirs(testsavedir, exist_ok=True)
-    rand_idx = random.randint(0, len(data_dict['poses'][data_dict['i_test']])-1)
+
+    __import__('ipdb').set_trace()
+
+    # 这个应该是选出来render的frame吧,frame可以加到render_viewpoints_kwargs中，传给model
+    rand_idx = random.randint(0, len(data_dict['poses'][data_dict['i_train']])-1)
+    # add frame
+    frame = data_dict['i_train'][rand_idx]
+
     logger.info("validating test set idx: {}".format(rand_idx))
     eval_lpips_alex = args.eval_lpips_alex and eval_all
     eval_lpips_vgg = args.eval_lpips_alex and eval_all
     rgbs, disps = render_viewpoints(
-        render_poses=data_dict['poses'][data_dict['i_test']][rand_idx][None],
-        HW=data_dict['HW'][data_dict['i_test']][rand_idx][None],
-        Ks=data_dict['Ks'][data_dict['i_test']][rand_idx][None],
-        gt_imgs=[data_dict['images'][i].cpu().numpy() for i in data_dict['i_test']][rand_idx][None],
-        masks=[data_dict['masks'][i].cpu().numpy() for i in data_dict['i_test']][rand_idx][None],
+        render_poses=data_dict['poses'][data_dict['i_train']][rand_idx][None],
+        HW=data_dict['HW'][data_dict['i_train']][rand_idx][None],
+        Ks=data_dict['Ks'][data_dict['i_train']][rand_idx][None],
+        gt_imgs=[data_dict['images'][i].cpu().numpy() for i in data_dict['i_train']][rand_idx][None],
+        masks=[data_dict['masks'][i].cpu().numpy() for i in data_dict['i_train']][rand_idx][None],
         savedir=testsavedir,
         eval_ssim=args.eval_ssim, eval_lpips_alex=eval_lpips_alex, eval_lpips_vgg=eval_lpips_vgg, idx=rand_idx, step=step,
-        **render_viewpoints_kwargs)
+        **render_viewpoints_kwargs, frame = frame)
+
+
+def validate_image(cfg, stage, step, data_dict, render_viewpoints_kwargs, eval_all=True, frame=-1):
+    testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{stage}')
+    os.makedirs(testsavedir, exist_ok=True)
+
+    # __import__('ipdb').set_trace()
+
+    rand_idx = None
+    if frame == -1:
+        # 这个应该是选出来render的frame吧,frame可以加到render_viewpoints_kwargs中，传给model
+        rand_idx = random.randint(0, len(data_dict['poses'][data_dict['i_train']])-1)
+        # add frame
+        frame = data_dict['i_train'][rand_idx]
+
+    logger.info("validating test set idx: {}".format(frame))
+    eval_lpips_alex = args.eval_lpips_alex and eval_all
+    eval_lpips_vgg = args.eval_lpips_alex and eval_all
+    rgbs, disps = render_viewpoints(
+        render_poses=data_dict['poses'][frame][None],
+        HW=data_dict['HW'][frame][None],
+        Ks=data_dict['Ks'][frame][None],
+        gt_imgs=[data_dict['images'][frame].cpu().numpy()],
+        masks=[data_dict['masks'][frame].cpu().numpy()],
+        savedir=testsavedir,
+        eval_ssim=args.eval_ssim, eval_lpips_alex=eval_lpips_alex, eval_lpips_vgg=eval_lpips_vgg, idx=rand_idx, step=step,
+        **render_viewpoints_kwargs, frame = frame)
+
 
 def validate_mesh(model, resolution=128, threshold=0.0, prefix="", world_space=False,
                   scale_mats_np=None, gt_eval=False, runtime=True, scene=122, smooth=True,
@@ -1163,9 +1282,18 @@ if __name__=='__main__':
         cfg.expname += "_" + args.suffix
     cfg.load_expname = args.load_expname if args.load_expname else cfg.expname
     # set up tensorboard
-    # ./logs/custom/scan/train/logs_all/scan/train/coarse
+    # ./logs/custom/RealCactus/logs_all/RealCactus/coarse
+    # 我们改一下，用数据集和case名来区分吧
+
+    __import__('ipdb').set_trace()
+
     writer_dir = os.path.join(cfg.basedir, cfg.expname0, 'logs_all', cfg.expname)
-    # writer = SummaryWriter(log_dir=writer_dir)
+    # 这样改一下
+    writer_dir_new = os.path.join(cfg.basedir, cfg.expname0, "logs_all", args.prefix, cfg.exp_stage)
+
+    print("---------------writer_dir: {}----------------".format(writer_dir))
+    
+    writer = SummaryWriter(log_dir=writer_dir)
     # set up the logger and tensorboard
     # ./logs/custom
     cfg.basedir0 = cfg.basedir
@@ -1235,7 +1363,11 @@ if __name__=='__main__':
     data_dict = load_everything(args=args, cfg=cfg)
 
     '''
-
+    此时的near和far是正常的
+    ipdb> near
+    0.13697632551193237
+    ipdb> far
+    2.7395265
 
     images : [80, 540, 960, 3]
     masks : [80, 540, 960, 1]

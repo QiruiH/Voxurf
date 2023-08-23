@@ -571,17 +571,6 @@ class Voxurf(torch.nn.Module):
                 rays_o=rays_o, rays_d=rays_d, is_train=global_step is not None, **render_kwargs)
         # interval = render_kwargs['stepsize'] * self.voxel_size_ratio
         
-        # skip known free space
-        if self.mask_cache is not None:
-            # 过完mask后数目会减少
-            mask = self.mask_cache(ray_pts)
-            ray_pts = ray_pts[mask]
-            ray_id = ray_id[mask]
-            step_id = step_id[mask]
-            mask_outbbox[~mask_outbbox] |= ~mask
-            
-        sdf_grid = self.smooth_conv(self.sdf.grid) if self.smooth_sdf else self.sdf.grid
-        
         '''
         下面要用ray_pts开始查询了，应该这里要过bending network
         '''
@@ -592,6 +581,33 @@ class Voxurf(torch.nn.Module):
         原来是每条ray对应一个viewdirs
         '''
         viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+
+        # skip known free space
+        if self.mask_cache is not None:
+            # 过完mask后数目会减少
+            mask = self.mask_cache(ray_pts)
+            ray_pts = ray_pts[mask]
+            ray_id = ray_id[mask]
+            step_id = step_id[mask]
+            mask_outbbox[~mask_outbbox] |= ~mask
+            viewdirs = viewdirs[mask]
+            bending_details['input_pts'] = bending_details['input_pts'][mask]
+            bending_details['offsets'] = bending_details['offsets'][mask]
+            bending_details['bent_pts'] = bending_details['bent_pts'][mask]
+
+            
+        sdf_grid = self.smooth_conv(self.sdf.grid) if self.smooth_sdf else self.sdf.grid
+        
+        '''
+        下面要用ray_pts开始查询了，应该这里要过bending network
+        '''
+        # ray_pts, bending_details = self.bending_network(ray_pts, frame)
+        # 重新计算viewdirs
+        '''
+        这里的viewdirs的shape变成[449995, 3]了，相当于每个点对应一个viewdirs
+        原来是每条ray对应一个viewdirs
+        '''
+        # viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
         
         sdf = self.grid_sampler(ray_pts, sdf_grid)
         self.gradient = self.neus_sdf_gradient(sdf=self.sdf.grid)
@@ -615,6 +631,7 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             alpha = alpha[mask]
             gradient = gradient[mask]
+            viewdirs = viewdirs[mask]
             bending_details['input_pts'] = bending_details['input_pts'][mask]
             bending_details['offsets'] = bending_details['offsets'][mask]
             bending_details['bent_pts'] = bending_details['bent_pts'][mask]
@@ -633,7 +650,8 @@ class Voxurf(torch.nn.Module):
         viewdirs_emb = (viewdirs.unsqueeze(-1) * self.viewfreq).flatten(-2)
         viewdirs_emb = torch.cat(
             [viewdirs, viewdirs_emb.sin(), viewdirs_emb.cos()], -1)
-        rgb_feat.append(viewdirs_emb.flatten(0, -2)[ray_id])
+        # rgb_feat.append(viewdirs_emb.flatten(0, -2)[ray_id]) # 原版
+        rgb_feat.append(viewdirs_emb.flatten(0, -2))
         rgb_feat = torch.cat(rgb_feat, -1)
 
         if self.geo_rgb_dim == 3:

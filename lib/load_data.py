@@ -69,6 +69,7 @@ def load_data(args, reso_level=2, train_all=True, wmask=True, white_bg=True):
 
         assert images.shape[-1] == 3
     elif args.dataset_type == 'dtu':
+        # 自己的数据也走的dtu路线
         images, poses, render_poses, hwf, K, i_split, scale_mats_np, masks = load_dtu_data(args.datadir, reso_level=reso_level, mask=wmask, white_bg=white_bg)
         print('Loaded dtu', images.shape, render_poses.shape, hwf, args.datadir)
         i_train, i_val, i_test = i_split

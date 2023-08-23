@@ -234,9 +234,6 @@ def create_optimizer_or_freeze_model(model, cfg_train, global_step, bending_late
     if bending_latents_list is not None:
         print('*'*30, 'add bending_network for optimizer.')
 
-        # bending_latents_list = bending_latents_list.parameters()
-        # param_group.append({'params': bending_latents_list})
-
         # 暂时用一下Voxurf的decay_factor
         bn_lr = 5e-5 * decay_factor
         for latent in bending_latents_list:
