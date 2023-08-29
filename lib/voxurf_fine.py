@@ -512,7 +512,11 @@ class Voxurf(torch.nn.Module):
         # 已经是每个点对应一个viewdirs了
         # 这里不能用deepcopy，会报错
         # dirs = deepcopy(viewdirs)
+        # 这里，如果ray_id是空的dirs也应该是空的
         dirs = viewdirs
+        if ray_id.shape[0] == 0:
+            dirs = viewdirs[ray_id]
+            
         inv_s = torch.ones(1).cuda() / self.s_val
         assert use_mid
         if use_mid:
@@ -708,7 +712,8 @@ class Voxurf(torch.nn.Module):
     def forward(self, rays_o, rays_d, viewdirs, frame, global_step=None, is_train=True, **render_kwargs):
         '''Volume rendering'''
 
-        # __import__('ipdb').set_trace()
+        # if is_train is False:
+            # __import__('ipdb').set_trace()
 
         ret_dict = {}
         N = len(rays_o)
@@ -719,6 +724,10 @@ class Voxurf(torch.nn.Module):
         ray_id/mask_outbbox [2318940]
         N_steps [8192]
         '''
+
+        # __import__('ipdb').set_trace()
+        # 最开始这一步还是一样的
+        # 原始采样中这里也可能出现采不到样的情况，但是对原始voxurf没有影响而已，因为它们不需要计算viewdirs
         ray_pts, ray_id, step_id, mask_outbbox, N_steps = self.sample_ray(
                 rays_o=rays_o, rays_d=rays_d, is_train=global_step is not None, **render_kwargs)
         # interval = render_kwargs['stepsize'] * self.voxel_size_ratio
@@ -741,16 +750,31 @@ class Voxurf(torch.nn.Module):
 # 
         #     return ret_dict
 
-        if ray_pts.shape[0] == 0:
-            __import__('ipdb').set_trace()
-            
+        
+        # if ray_pts.shape[0] == 0:
+        #     __import__('ipdb').set_trace()
         # 或许我们应该把形变网络提到前面来，因为要mask的时候就已经需要ray_pts了
+        view_need_compute = False
+
         ray_pts, bending_details = self.bending_network(ray_pts, frame)    
-        viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+        if ray_pts.shape[0] > 1:
+            view_need_compute = True
+            # 只有不等于0的时候需要计算。等于0的时候viewdirs就保持就行了，反正也用不到
+            # 这个计算原理对于只有一个点的时候也没法算了
+            viewdirs = self.bending_network.compute_viewdirs(viewdirs, bending_details, frame)
+        elif ray_pts.shape[0] == 1:
+            view_need_compute = True
+            viewdirs = viewdirs[ray_id]
         # 我们的viewdirs和ray_pts是一一对应的，所以直接跟ray_pts一起mask就行了
+        # else:
+            # viewdirs = torch.tensor([])
+        
 
         if self.mask_cache is not None:
             # mask过滤一遍
+
+            # 离谱，这里的mask_cache过完还剩好多，但原始Voxurf过完这里就没了
+            # 也合理吧，因为我们这里的ray_pts是经过变形的，应该有很多变到mask内部去了
             mask = self.mask_cache(ray_pts)
             # validate 的时候是这里出了问题，过完mask之后什么都没有了
             '''
@@ -764,7 +788,8 @@ class Voxurf(torch.nn.Module):
             ray_id = ray_id[mask]
             step_id = step_id[mask]
             mask_outbbox[~mask_outbbox] |= ~mask
-            viewdirs = viewdirs[mask]
+            if view_need_compute is True:
+                viewdirs = viewdirs[mask]
             bending_details['input_pts'] = bending_details['input_pts'][mask]
             bending_details['offsets'] = bending_details['offsets'][mask]
             bending_details['bent_pts'] = bending_details['bent_pts'][mask]
@@ -836,7 +861,8 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             gradient = gradient[mask] # merge to sample once
             sdf = sdf[mask]
-            viewdirs = viewdirs[mask]
+            if view_need_compute is True:
+                viewdirs = viewdirs[mask]
             bending_details['input_pts'] = bending_details['input_pts'][mask]
             bending_details['offsets'] = bending_details['offsets'][mask]
             bending_details['bent_pts'] = bending_details['bent_pts'][mask]
@@ -850,14 +876,15 @@ class Voxurf(torch.nn.Module):
         # compute accumulated transmittance
         if ray_id.ndim == 2:
             print(mask, alpha, ray_id)
-            mask = mask.squeeze(0)
-            alpha = alpha.squeeze(0)
-            ray_id = ray_id.squeeze(0)
-            ray_pts = ray_pts.squeeze(0)
-            step_id = step_id.squeeze(0)
-            gradient = gradient.squeeze(0)
-            sdf = sdf.squeeze(0)
+            mask = mask.squeeze()
+            alpha = alpha.squeeze()
+            ray_id = ray_id.squeeze()
+            ray_pts = ray_pts.squeeze()
+            step_id = step_id.squeeze()
+            gradient = gradient.squeeze()
+            sdf = sdf.squeeze()
 
+        '''
         if alpha.dim() == 0:
             # __import__('ipdb').set_trace()
             alpha = alpha.unsqueeze(0)
@@ -865,7 +892,23 @@ class Voxurf(torch.nn.Module):
 
         if ray_id.dim() != 1:
             __import__('ipdb').set_trace()
+        '''
 
+        if ray_id.dim() != 1 or alpha.dim() != 1:
+            __import__('ipdb').set_trace()
+            # 一般报错好像都是alpha.dim() = 0, ray_id.dim() = 2
+            # 我们先这么治疗，因为这个bug太难定位，没法复现，每次运行都不一样
+            # 算了，保险期间0或者2都处理了吧
+            if alpha.dim() == 0:
+                alpha = alpha.unsqueeze(0)
+            if alpha.dim() == 2:
+                alpha = alpha.squeeze(0)
+            if ray_id.dim() == 0:
+                ray_id = ray_id.unsqueeze(0)
+            if ray_id.squeeze(0) == 2:
+                ray_id = ray_id.squeeze(0)
+            
+            
 
         weights, alphainv_last = Alphas2Weights.apply(alpha, ray_id, N)
         if self.fast_color_thres > 0:
@@ -877,7 +920,8 @@ class Voxurf(torch.nn.Module):
             step_id = step_id[mask]
             gradient = gradient[mask]
             sdf = sdf[mask]
-            viewdirs = viewdirs[mask]
+            if view_need_compute is True:
+                viewdirs = viewdirs[mask]
             bending_details['input_pts'] = bending_details['input_pts'][mask]
             bending_details['offsets'] = bending_details['offsets'][mask]
             bending_details['bent_pts'] = bending_details['bent_pts'][mask]
@@ -917,16 +961,25 @@ class Voxurf(torch.nn.Module):
 
         
         if self.use_rgbnet_k0:
-            rgb_feat = torch.cat([
-                # k0, xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id] # 原版
-                k0, xyz_emb, viewdirs_emb.flatten(0, -2)
+            if ray_id.shape[0] == 0:
+                rgb_feat = torch.cat([
+                k0, xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id]
             ], -1)
+            else:
+                rgb_feat = torch.cat([
+                    # k0, xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                    k0, xyz_emb, viewdirs_emb.flatten(0, -2)
+                ], -1)
         else:
-            # 228这里会出错
-            rgb_feat = torch.cat([
-                # xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id] # 原版
-                xyz_emb, viewdirs_emb.flatten(0, -2)
-            ], -1)
+            if ray_id.shape[0] == 0:
+                rgb_feat = torch.cat([
+                    xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                ], -1)
+            else:
+                rgb_feat = torch.cat([
+                    # xyz_emb, viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                    xyz_emb, viewdirs_emb.flatten(0, -2)
+                ], -1)
 
         hierarchical_feats = []
         # 下面的这些分支都进了，所以all_grad中的nan全加到hierarchical_feats里去了
@@ -949,10 +1002,15 @@ class Voxurf(torch.nn.Module):
             k_xyz_emb = torch.cat([rays_xyz, k_xyz_emb.sin(), k_xyz_emb.cos()], -1)
             k_viewdirs_emb = (viewdirs.unsqueeze(-1) * self.k_viewfreq).flatten(-2)
             k_viewdirs_emb = torch.cat([viewdirs, k_viewdirs_emb.sin(), k_viewdirs_emb.cos()], -1)
-            k_rgb_feat = torch.cat([
-                # k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)[ray_id] # 原版
-                k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)
-            ], -1)
+            if ray_id.shape[0] == 0:
+                k_rgb_feat = torch.cat([
+                    k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                ], -1)
+            else:
+                k_rgb_feat = torch.cat([
+                    # k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)[ray_id] # 原版
+                    k0, k_xyz_emb, k_viewdirs_emb.flatten(0, -2)
+                ], -1)
 
             assert len(self.k_grad_feat) == 1 and self.k_grad_feat[0] == 1.0
             assert len(self.k_sdf_feat) == 0

@@ -117,6 +117,8 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
 
         H, W = HW[i]
         K = Ks[i]
+
+        # 到这里两个版本的rays_o和rays_d以及viewdirs还是相同的
         rays_o, rays_d, viewdirs = Model.get_rays_of_a_view(
             H, W, K, c2w, ndc, inverse_y=render_kwargs['inverse_y'],
             flip_x=cfg.data.flip_x, flip_y=cfg.data.flip_y)
@@ -138,26 +140,31 @@ def render_viewpoints(model, render_poses, HW, Ks, ndc, render_kwargs,
         ['rgb_marched', 'disp', 'alphainv_cum', 'normal_marched']
         '''
         # 这里好怪啊，单次跟几轮循环都是可以的，但是就是没法运行完
-        render_result_chunks = [
-            {k: v for k, v in model(ro, rd, vd, frame, is_train=False, **render_kwargs).items() if k in keys}
-            for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
-        ]
+        # render_result_chunks = [
+        #     {k: v for k, v in model(ro, rd, vd, frame, is_train=False, **render_kwargs).items() if k in keys}
+        #     for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0))
+        # ]
+
         # 为了方便debug我们先换一种写法
-        '''
-        i = 0
-        for ro, rd, vd in zip(rays_o.split(1024, 0), rays_d.split(1024, 0), viewdirs.split(1024, 0)):
+        
+        # __import__('ipdb').set_trace()
+        
+        j = 0
+        render_result_chunks = []
+        for ro, rd, vd in zip(rays_o.split(8192, 0), rays_d.split(8192, 0), viewdirs.split(8192, 0)):
             
-            print("#----------i:{}-----------#".format(i))
-            if i == 228:
+            print("#----------i:{}-----------#".format(j))
+            # if i == 45:
                 # __import__('ipdb').set_trace()
             
             res = model(ro, rd, vd, frame, is_train=False, **render_kwargs)
-            render_result_chunks = [
+            render_result_chunks.append(
                 {k: v for k, v in res.items() if k in keys}
-            ]
+            )
 
-            i = i + 1
-        '''
+            j = j + 1
+        
+        # __import__('ipdb').set_trace()
         
         # __import__('ipdb').set_trace()
 
@@ -547,7 +554,9 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             smooth = getattr(model, 'init_sdf_smooth', False)
             if smooth:
                 model.sdf = model.smooth_conv(model.sdf)
-        optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0)
+        # 这里原来没有加bending latenets list，但感觉应该是要加的，因为过完这个分支optimizer就被这个新的覆盖了
+        # coarse没有进这个分支所以不是很影响
+        optimizer = utils.create_optimizer_or_freeze_model(model, cfg_train, global_step=0, bending_latents_list=model.bending_latents_list)
     # coarse和fine都没有进这个分支
     elif args.sdf_mode != "density" and load_density_from:
         smooth = getattr(model, 'init_density_smooth', True)
@@ -802,6 +811,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
         if cfg.bending_network is not None:
             offset_loss = render_result['offset_loss']
             divergence_loss = render_result['divergence_loss']
+            # print("=========offset weight: {}, divergence weight: {}=========".format(cfg_train.offset_weight, cfg_train.divergence_weight))
             bending_losses = offset_loss * cfg_train.offset_weight \
                             + divergence_loss * cfg_train.divergence_weight
             if cfg_train.bending_increasing:
@@ -989,28 +999,6 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
             psnr_lst, weight_lst, weight_sum_lst, weight_nonzero_lst, mask_lst, bg_mask_lst, s_val_lst = [], [], [], [], [], [], []
 
         # validate image
-        '''
-        我们能不能试试在这对每一个图片做渲染呢
-        '''
-        # render_viewpoints_kwargs = {
-        #         'model': model,
-        #         'ndc': cfg.data.ndc,
-        #         'render_kwargs': {
-        #             'near': data_dict['near'],
-        #             'far': data_dict['far'],
-        #             'bg': 1 if cfg.data.white_bkgd else 0,
-        #             'stepsize': cfg_model.stepsize,
-        #             'inverse_y': cfg.data.inverse_y,
-        #             'flip_x': cfg.data.flip_x,
-        #             'flip_y': cfg.data.flip_y,
-        #             'render_grad': True,
-        #             'render_depth': True,
-        #             'render_in_out': True,
-        #         },
-        #     }
-        # validate_image(cfg, stage, global_step, data_dict, render_viewpoints_kwargs, eval_all=cfg_train.N_iters==global_step, frame=frame)
-
-
         # args.i_validate = 10000，且在fine的阶段才行
         if global_step%args.i_validate==0 and global_step != cfg_train.N_iters and stage == 'surf' and 'fine' in args.sdf_mode:
             
@@ -1033,11 +1021,7 @@ def scene_rep_reconstruction(args, cfg, cfg_model, cfg_train, xyz_min, xyz_max, 
                     'render_in_out': True,
                 },
             }
-            try:
-                # 先避一避调调参吧
-                validate_image(cfg, stage, global_step, data_dict, render_viewpoints_kwargs, eval_all=cfg_train.N_iters==global_step, frame=frame)
-            except:
-                pass
+            validate_image(cfg, stage, global_step, data_dict, render_viewpoints_kwargs, eval_all=cfg_train.N_iters==global_step)
 
         # validate mesh
         prefix = args.prefix + '_' if args.prefix else ''
@@ -1160,18 +1144,20 @@ def train(args, cfg, data_dict):
         eps_time_str = f'{eps_time//3600:02.0f}:{eps_time//60%60:02.0f}:{eps_time%60:02.0f}'
         logger.info('train: finish (eps time' + eps_time_str + ')')
 
-def validate_image_old(cfg, stage, step, data_dict, render_viewpoints_kwargs, eval_all=True):
+def validate_image(cfg, stage, step, data_dict, render_viewpoints_kwargs, eval_all=True):
     testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{stage}')
     os.makedirs(testsavedir, exist_ok=True)
 
-    __import__('ipdb').set_trace()
+    # __import__('ipdb').set_trace()
 
     # 这个应该是选出来render的frame吧,frame可以加到render_viewpoints_kwargs中，传给model
     rand_idx = random.randint(0, len(data_dict['poses'][data_dict['i_train']])-1)
     # add frame
+    # rand_idx = 85
     frame = data_dict['i_train'][rand_idx]
 
     logger.info("validating test set idx: {}".format(rand_idx))
+
     eval_lpips_alex = args.eval_lpips_alex and eval_all
     eval_lpips_vgg = args.eval_lpips_alex and eval_all
     rgbs, disps = render_viewpoints(
@@ -1180,33 +1166,6 @@ def validate_image_old(cfg, stage, step, data_dict, render_viewpoints_kwargs, ev
         Ks=data_dict['Ks'][data_dict['i_train']][rand_idx][None],
         gt_imgs=[data_dict['images'][i].cpu().numpy() for i in data_dict['i_train']][rand_idx][None],
         masks=[data_dict['masks'][i].cpu().numpy() for i in data_dict['i_train']][rand_idx][None],
-        savedir=testsavedir,
-        eval_ssim=args.eval_ssim, eval_lpips_alex=eval_lpips_alex, eval_lpips_vgg=eval_lpips_vgg, idx=rand_idx, step=step,
-        **render_viewpoints_kwargs, frame = frame)
-
-
-def validate_image(cfg, stage, step, data_dict, render_viewpoints_kwargs, eval_all=True, frame=-1):
-    testsavedir = os.path.join(cfg.basedir, cfg.expname, f'render_test_{stage}')
-    os.makedirs(testsavedir, exist_ok=True)
-
-    # __import__('ipdb').set_trace()
-
-    rand_idx = None
-    if frame == -1:
-        # 这个应该是选出来render的frame吧,frame可以加到render_viewpoints_kwargs中，传给model
-        rand_idx = random.randint(0, len(data_dict['poses'][data_dict['i_train']])-1)
-        # add frame
-        frame = data_dict['i_train'][rand_idx]
-
-    logger.info("validating test set idx: {}".format(frame))
-    eval_lpips_alex = args.eval_lpips_alex and eval_all
-    eval_lpips_vgg = args.eval_lpips_alex and eval_all
-    rgbs, disps = render_viewpoints(
-        render_poses=data_dict['poses'][frame][None],
-        HW=data_dict['HW'][frame][None],
-        Ks=data_dict['Ks'][frame][None],
-        gt_imgs=[data_dict['images'][frame].cpu().numpy()],
-        masks=[data_dict['masks'][frame].cpu().numpy()],
         savedir=testsavedir,
         eval_ssim=args.eval_ssim, eval_lpips_alex=eval_lpips_alex, eval_lpips_vgg=eval_lpips_vgg, idx=rand_idx, step=step,
         **render_viewpoints_kwargs, frame = frame)
@@ -1285,15 +1244,15 @@ if __name__=='__main__':
     # ./logs/custom/RealCactus/logs_all/RealCactus/coarse
     # 我们改一下，用数据集和case名来区分吧
 
-    __import__('ipdb').set_trace()
+    # __import__('ipdb').set_trace()
 
-    writer_dir = os.path.join(cfg.basedir, cfg.expname0, 'logs_all', cfg.expname)
+    # writer_dir = os.path.join(cfg.basedir, cfg.expname0, 'logs_all', cfg.expname)
     # 这样改一下
     writer_dir_new = os.path.join(cfg.basedir, cfg.expname0, "logs_all", args.prefix, cfg.exp_stage)
 
-    print("---------------writer_dir: {}----------------".format(writer_dir))
+    print("---------------writer_dir: {}----------------".format(writer_dir_new))
     
-    writer = SummaryWriter(log_dir=writer_dir)
+    writer = SummaryWriter(log_dir=writer_dir_new)
     # set up the logger and tensorboard
     # ./logs/custom
     cfg.basedir0 = cfg.basedir

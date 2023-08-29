@@ -62,7 +62,7 @@ coarse_train = dict(
 fine_train = deepcopy(coarse_train)
 fine_train.update(dict(
     N_iters=20000,
-    N_rand=1024, #8192,
+    N_rand=1024, #1024, #8192,
     pervoxel_lr=False,
     ray_sampler='in_maskcache',
     weight_entropy_last=0.001,

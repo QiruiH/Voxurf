@@ -27,9 +27,9 @@ surf_train=dict(
     weight_main=1,    # this is for k_rgbnet, which is the final output
 
     sdf_reduce=0.3,
-    N_iters=20000,
+    N_iters=40000, #20000,
     lrate_decay=20,
-    # eval_iters=[100, 500, 1000, 2000, 3000, 5000, 10000, 15000, 17000, 18000, 19000, 20000, 25000, 30000, 35000],
+    eval_iters=[100, 5000, 10000, 15000, 17000, 18000, 19000, 20000, 25000, 30000, 35000],
 
     tv_dense_before=20000,
     tv_end=30000,
@@ -64,9 +64,10 @@ surf_train=dict(
     # bending_network_train=dict(
     bending_increasing = True,
     zero_init = True,
-    flow_weight = 0.0, 
-    divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
-    offset_weight = 20000.0
+    flow_weight = 0.0,          
+    # fine阶段权重改大点试试
+    divergence_weight = 2000.0, # 参数还是要继续调的，这里先直接抄过来
+    offset_weight = 200000.0
     # ),
 )
 
@@ -111,7 +112,7 @@ surf_model_and_render=dict(
         bending_increasing = True,
         zero_init = True,
         flow_weight = 0.0, 
-        divergence_weight = 200.0, # 参数还是要继续调的，这里先直接抄过来
-        offset_weight = 20000.0
+        divergence_weight = 2000.0, # 参数还是要继续调的，这里先直接抄过来
+        offset_weight = 200000.0
     ),
 )
