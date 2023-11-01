@@ -85,7 +85,7 @@ surf_model_and_render=dict(
     k_grad_feat=(1.0,),  # default = 0 | or set as 3 to feed in the normal itself | or set as geo_rgb_dim to feed in the hierarchical normal
     k_sdf_feat=(), # default = 0 | or we could set it as feat_rgb_dim so that it takes in the feature
     rgbnet_dim=6, # larger is better
-    rgbnet_width=192,
+    rgbnet_width=128, # 192, # 改成128试试
     center_sdf=True,
     k_center_sdf=False,
     grad_feat=(0.5, 1.0, 1.5, 2.0,),
