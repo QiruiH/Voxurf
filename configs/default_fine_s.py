@@ -33,7 +33,7 @@ data = dict(
 '''
 coarse_train = dict(
     N_iters=10000, #10000,                # number of optimization steps
-    N_rand=1024, #8192,                  # batch size (number of random rays per optimization step)
+    N_rand=512, #1024, #8192,                  # batch size (number of random rays per optimization step)
     lrate_density=1e-1,           # lr of density voxel grid
     lrate_k0=1e-1,                # lr of color/feature voxel grid
     lrate_rgbnet=1e-3,            # lr of the mlp to predict view-dependent color
